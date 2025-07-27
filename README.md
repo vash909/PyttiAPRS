@@ -182,7 +182,7 @@ The client implements this encoding internally and does not rely on external lib
 
 The client saves your station settings in a JSON file named **`aprs_tui_config.json`**.  When you exit the program, it attempts to write this file to one of several candidate locations in the following order:
 
-1. The directory where `aprs_tui.py` resides.
+1. The directory where `PittyAPRS.py` resides.
 2. Your home directory as `.aprs_tui_config.json`.
 3. The current working directory from which you launched the script.
 

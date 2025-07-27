@@ -29,7 +29,7 @@ Automatic Packet Reporting System (APRS) is a digital communications protocol fo
 - Monitor the raw AX.25 **path** of each packet to see how and where it was digipeated.
 - Operate entirely from a terminal, using a curses‑based interface reminiscent of `htop`.
 
-The client communicates with a **KISS‑compatible TNC**, such as [Direwolf](https://github.com/wb2osz/direwolf), running locally.  KISS (Keep It Simple Stupid) is a framing protocol that encapsulates AX.25 frames for transport over serial or TCP linkshttps://thomask.sdf.org/blog/2018/12/15/sending-raw-ax25-python.html#:~:text=There%20are%20four%20main%20steps,involved.
+The client communicates with a **KISS‑compatible TNC**, such as [Direwolf](https://github.com/wb2osz/direwolf), running locally.  KISS (Keep It Simple Stupid) is a framing protocol that encapsulates AX.25 frames for transport over serial or TCP links.
 
 ---
 
@@ -66,11 +66,11 @@ If it cannot connect to the TNC, verify that Direwolf is running and that the KI
 On the first run, the client prompts you for several **station parameters**:
 
 1. **Callsign & SSID** (e.g. `IK2ABC-7`).
-2. **Software identifier** (TOCALL) – a six‑character identifier; default is `APZ001`https://raw.githubusercontent.com/aprsorg/aprs-deviceid/main/tocalls.yaml#:~:text=,APRSISCE%20class%3A%20software%20os%3A%20Android.
+2. **Software identifier** (TOCALL) – a six‑character identifier; default is `APZ001` - In satellite comms you should use your WW Locator.
 3. **Digipeater path** – a comma‑ or space‑separated list of digipeaters (e.g. `WIDE2-2,ARISS`).  Hyphens are preserved inside callsigns.
 4. **Latitude & Direction** – enter the numeric degrees (e.g. `45.67`) and select `N` or `S`.
 5. **Longitude & Direction** – numeric degrees (e.g. `7.89`) and select `E` or `W`.
-6. **Symbol table & code** – determines the icon shown on APRS maps.  Table `/` is primary and `\` is secondary; the code is a single character (e.g. `>` for a mobile).  Refer to [APRS symbol charts](https://www.aprs.org/symbols.html) for options.
+6. **Symbol table & code** – determines the icon shown on APRS maps.  Table `/` is primary and `\` is secondary; the code is a single character (e.g. `>` for a mobile).  Refer to APRS Symbol Chart for options.
 7. **Default position comment** – optional comment appended to all position packets.
 
 These settings are saved and automatically loaded on subsequent runs.  See [Configuration File & Persistence](#configuration-file--persistence) for details.
@@ -99,8 +99,8 @@ The interface is non‑interactive beyond the commands; new packets appear as th
 
 | Key | Action |
 |---|---|
-| `m` | **Send message** – prompts for destination (addressee) and message text.  Messages follow the APRS message format `::DEST:Text{ID}` with a padded nine‑character addressee field and a maximum of ~67 charactersm.packet-radio.net/packet/aprs-wb2osz/Understanding-APRS-Packets.pdf#:~:text=2.5.1%20Simple%20Case%20,only.  A numeric ID is appended automatically to support acknowledgements. |
-| `p` | **Send position beacon** – transmits your configured latitude/longitude using the uncompressed format `!DDMM.mmN/DDDMM.mmE` and the selected symbolhttps://raw.githubusercontent.com/python-aprs/aprs3/main/aprs/position.py#:~:text=lat%2C%20long%2C%20sym_table_id%2C%20symbol_code%2C%20ambiguity%3DNone%2C,.  The default comment set in your configuration is appended; it is not prompted each time. |
+| `m` | **Send message** – prompts for destination (addressee) and message text.  Messages follow the APRS message format `::DEST:Text{ID}` with a padded nine‑character addressee field and a maximum of ~67 characters.  A numeric ID is appended automatically to support acknowledgements. |
+| `p` | **Send position beacon** – transmits your configured latitude/longitude using the uncompressed format `!DDMM.mmN/DDDMM.mmE` and the selected symbol.  The default comment set in your configuration is appended; it is not prompted each time. |
 | `c` | **Configure station** – opens a form to edit any station parameter: callsign, tocall, digipeater path, latitude/longitude & directions, symbol table & code and default position comment.  Changes take effect immediately. |
 | `q` | **Quit** – exits the program, closes the TNC connection and saves the current configuration. |
 
@@ -120,7 +120,7 @@ Pressing `c` invokes the configuration editor.  Inputs are taken at the bottom o
 - **Default position comment** – text appended to every beacon.
 - **KISS host & port** – adjust if your TNC is not on `localhost:8001`.
 
-Changes are saved automatically on exit.
+Changes are saved automatically on exit. REMEMBER TO PRESS Q INSTEAD OF CLOSING YOUR TERMINAL WINDOW.
 
 ---
 
@@ -136,8 +136,8 @@ APRS messages are sent as **AX.25 UI (Unnumbered Information) frames**.  The inf
 ::ADDRESSEE:Message text{nnn
 ```
 
-- The **addressee** is padded to exactly nine characters (spaces if needed).  This ensures fixed field lengthsm.packet-radio.net/packet/aprs-wb2osz/Understanding-APRS-Packets.pdf#:~:text=2.5.1%20Simple%20Case%20,only.
-- The **message text** should be no longer than 67 characters and remain on a single line to minimise network congestionm.packet-radio.net/packet/aprs-wb2osz/Understanding-APRS-Packets.pdf#:~:text=2.5.1%20Simple%20Case%20,only.
+- The **addressee** is padded to exactly nine characters (spaces if needed).  This ensures fixed field length
+- The **message text** should be no longer than 67 characters and remain on a single line to minimise network congestion
 - The optional **message ID** (e.g. `{001}`) triggers the recipient to send an acknowledgement (`ack001`).  The client increments this ID automatically for each message.
 
 ### Position Packets
@@ -155,7 +155,7 @@ Where:
 - `T` is the symbol **table** character (`/` or `\`).
 - `DDDMM.mmE/W` is longitude.
 - `S` is the symbol **code** character.
-- `Comment` is optional free texthttps://raw.githubusercontent.com/python-aprs/aprs3/main/aprs/position.py#:~:text=lat%2C%20long%2C%20sym_table_id%2C%20symbol_code%2C%20ambiguity%3DNone%2C,.
+- `Comment` is optional free text.
 
 The client builds this string from your latitude/longitude and selected symbol.  Your default comment is appended automatically.
 
@@ -171,7 +171,7 @@ AX.25 UI frames are constructed by concatenating:
 The resulting raw frame is then encapsulated into a **KISS frame**:
 
 - Start with `FEND (0xC0)`, followed by a command byte (`0x00` for data).
-- Escape any occurrence of `FEND (0xC0)` and `FESC (0xDB)` in the payload using `FESC TFEND (0xDB 0xDC)` and `FESC TFESC (0xDB 0xDD)` respectivelyhttps://thomask.sdf.org/blog/2018/12/15/sending-raw-ax25-python.html#:~:text=There%20are%20four%20main%20steps,involved.
+- Escape any occurrence of `FEND (0xC0)` and `FESC (0xDB)` in the payload using `FESC TFEND (0xDB 0xDC)` and `FESC TFESC (0xDB 0xDD)` respectively.
 - End with `FEND`.
 
 The client implements this encoding internally and does not rely on external libraries.

@@ -48,13 +48,13 @@ The client communicates with a **KISS‑compatible TNC**, such as [Direwolf](htt
 
 1. Clone or download this repository:
    ```bash
-   git clone https://github.com/yourusername/aprs-tui-client.git
-   cd aprs-tui-client
+   git clone https://github.com//vash909/PyttiAPRS.git
+   cd PyttiAPRS
    ```
 
-2. Ensure `aprs_tui.py` is executable and run it:
+2. Ensure `PyttiAPRS.py` is executable and run it:
    ```bash
-   python3 aprs_tui.py
+   python3 PyttiAPRS.py
    ```
 
 If it cannot connect to the TNC, verify that Direwolf is running and that the KISS port is correctly set.

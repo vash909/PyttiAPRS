@@ -620,6 +620,16 @@ class APRSTUI:
             # Fallback attribute if colours are unavailable
             self._highlight_attr = curses.A_REVERSE
 
+        # Track whether acknowledgements (message IDs) are appended to outgoing
+        # messages.  APRS over satellites may not support ACKs, so this can
+        # be toggled at runtime via the 'a' key.  Default is True (ACKs on).
+        self.ack_enabled: bool = True
+        # Remember the most recently sent message so that it can be
+        # retransmitted (for example if a digipeater did not repeat it).
+        # Stored as a tuple (destination, text, msg_id).  msg_id may be None
+        # if acknowledgements are disabled when the message was sent.
+        self.last_message: Optional[Tuple[str, str, Optional[int]]] = None
+
     def run(self) -> None:
         """Main UI loop."""
         while True:
@@ -648,6 +658,12 @@ class APRSTUI:
             # Clear the list of heard stations
             elif c == ord('h'):
                 self.clear_heard()
+            # Repeat the last sent message
+            elif c == ord('r'):
+                self.repeat_last_message()
+            # Toggle acknowledgements on/off
+            elif c == ord('a'):
+                self.toggle_ack()
             # small sleep to reduce CPU
             time.sleep(0.05)
 
@@ -660,11 +676,16 @@ class APRSTUI:
             f"CALL {self.cfg.callsign} TOCALL {self.cfg.tocall} PATH "
             f"{'-'.join(self.cfg.path) if self.cfg.path else 'NONE'} "
             f"LAT {self.cfg.latitude:.4f} LON {self.cfg.longitude:.4f} "
-            f"SYM {self.cfg.symbol_table}{self.cfg.symbol_code}"
+            f"SYM {self.cfg.symbol_table}{self.cfg.symbol_code} "
+            f"ACK {'ON' if self.ack_enabled else 'OFF'}"
         )
         self.stdscr.addstr(0, 0, status[:width - 1])
-        # Commands line.  Include commands for clearing messages and the heard list.
-        cmd_line = "m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  q:quit"
+        # Commands line.  Include commands for clearing messages and the heard list,
+        # toggling acknowledgements, and resending the last message.
+        cmd_line = (
+            "m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  "
+            "r:repeat  a:ack on/off  q:quit"
+        )
         self.stdscr.addstr(1, 0, cmd_line[:width - 1], curses.A_DIM)
         # Determine areas
         msgs_height = height - 4
@@ -722,6 +743,18 @@ class APRSTUI:
         heard_height = height - 4
         for i in range(min(heard_height, len(heard_list))):
             self.stdscr.addstr(3 + i, msgs_width, heard_list[i][:19])
+
+        # Draw a vertical separator between the message area and the heard list
+        # for a cleaner layout.  Use ACS_VLINE if available; otherwise fall back
+        # to the '|' character.  Only draw within the bounds of the messages
+        # area to avoid overwriting the prompt on the last line.
+        try:
+            vch = curses.ACS_VLINE
+        except Exception:
+            vch = ord('|')
+        # Draw starting from row 2 to row height-2 (messages area height), at the
+        # last column of the messages pane.  This adds a clear divider.
+        self.stdscr.vline(2, msgs_width - 1, vch, msgs_height + 1)
         self.stdscr.refresh()
 
     # Handle incoming frames from the TNC
@@ -771,7 +804,14 @@ class APRSTUI:
             text = self._prompt("Message: ")
             if text is None:
                 return
-            msg_id = self.cfg.next_msg_id()
+            # Determine whether to include an acknowledgement ID.  When
+            # acknowledgements are disabled (for example, during satellite
+            # operations), omit the message ID entirely by passing None to
+            # build_aprs_message().  Otherwise obtain the next sequential ID.
+            if self.ack_enabled:
+                msg_id = self.cfg.next_msg_id()
+            else:
+                msg_id = None
             payload = build_aprs_message(dest, text, msg_id=msg_id)
             ax25 = encode_ax25_frame(
                 self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
@@ -782,6 +822,9 @@ class APRSTUI:
             self.messages.append(
                 (ts, self.cfg.callsign, dest, payload, list(self.cfg.path))
             )
+            # Store last message for possible retransmission.  msg_id may be None
+            # when acknowledgements are disabled.
+            self.last_message = (dest, text, msg_id)
         finally:
             # Restore non‑blocking mode
             self.stdscr.nodelay(True)
@@ -908,6 +951,42 @@ class APRSTUI:
         influence ongoing reception; stations will be added again when
         new packets arrive."""
         self.heard.clear()
+
+    def toggle_ack(self) -> None:
+        """Toggle the inclusion of message acknowledgements on outgoing messages.
+
+        When acknowledgements are enabled, outgoing APRS messages include a
+        sequential message ID with a leading '{', allowing the recipient to
+        acknowledge receipt.  Disabling acknowledgements omits this ID,
+        which can be desirable for satellite communications where ACKs
+        are unsupported.  This method flips the state between ON and OFF.
+        """
+        self.ack_enabled = not self.ack_enabled
+
+    def repeat_last_message(self) -> None:
+        """Retransmit the most recently sent message.
+
+        If the user suspects that the previous message was not relayed by
+        a digipeater or satellite, this function resends it using the same
+        destination, text and, if acknowledgements are enabled, the same
+        message ID.  If no message has been sent yet, this method does
+        nothing.  The retransmission is logged to the UI with the current
+        timestamp.
+        """
+        if not self.last_message:
+            return
+        dest, text, msg_id = self.last_message
+        # Build payload based on the current acknowledgement setting.  If
+        # acknowledgements are disabled, omit the message ID by passing None.
+        use_id = msg_id if self.ack_enabled else None
+        payload = build_aprs_message(dest, text, msg_id=use_id)
+        ax25 = encode_ax25_frame(
+            self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+        )
+        self.tnc.send_frame(ax25)
+        ts = time.time()
+        # Log retransmitted message in the UI
+        self.messages.append((ts, self.cfg.callsign, dest, payload, list(self.cfg.path)))
 
 
 def main(stdscr: curses.window) -> None:

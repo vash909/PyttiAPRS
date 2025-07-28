@@ -630,14 +630,24 @@ class APRSTUI:
                 c = self.stdscr.getch()
             except Exception:
                 c = -1
+            # Quit the application
             if c == ord('q'):
                 break
+            # Compose and send a message
             elif c == ord('m'):
                 self._compose_message()
+            # Send a position beacon
             elif c == ord('p'):
                 self._send_position()
+            # Edit station configuration
             elif c == ord('c'):
                 self._edit_config()
+            # Clear all logged packets
+            elif c == ord('x'):
+                self.clear_messages()
+            # Clear the list of heard stations
+            elif c == ord('h'):
+                self.clear_heard()
             # small sleep to reduce CPU
             time.sleep(0.05)
 
@@ -653,8 +663,8 @@ class APRSTUI:
             f"SYM {self.cfg.symbol_table}{self.cfg.symbol_code}"
         )
         self.stdscr.addstr(0, 0, status[:width - 1])
-        # Commands line
-        cmd_line = "m:msg  p:pos  c:cfg  q:quit"
+        # Commands line.  Include commands for clearing messages and the heard list.
+        cmd_line = "m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  q:quit"
         self.stdscr.addstr(1, 0, cmd_line[:width - 1], curses.A_DIM)
         # Determine areas
         msgs_height = height - 4
@@ -701,10 +711,15 @@ class APRSTUI:
                     self.stdscr.addstr(row_pos, cs_end, truncated[cs_end:])
             else:
                 self.stdscr.addstr(row_pos, 0, truncated)
-        # Draw heard stations
+        # Draw heard stations.  Reserve the bottom line for prompts by limiting
+        # the height of the list to match the messages area.  Without this
+        # constraint the heard list would overwrite the prompt line when the
+        # screen is full, causing the input prompt to appear mid‑screen.
         self.stdscr.addstr(2, msgs_width, "Heard:", curses.A_BOLD)
         heard_list = list(self.heard)
-        heard_height = height - 3
+        # Use the same height as the messages area (height - 4) to avoid
+        # drawing into the last line of the terminal reserved for user input.
+        heard_height = height - 4
         for i in range(min(heard_height, len(heard_list))):
             self.stdscr.addstr(3 + i, msgs_width, heard_list[i][:19])
         self.stdscr.refresh()
@@ -876,6 +891,23 @@ class APRSTUI:
             # Restore non‑blocking mode
             self.stdscr.nodelay(True)
             self.stdscr.timeout(100)
+
+    def clear_messages(self) -> None:
+        """Clear all received and logged packets from the UI.
+
+        This method empties the messages list, effectively removing all
+        displayed packets from the main view.  It does not clear the
+        underlying TNC message queue; new incoming packets will continue
+        to appear as they are received."""
+        self.messages.clear()
+
+    def clear_heard(self) -> None:
+        """Clear the list of heard stations.
+
+        Removes all callsigns from the heard set.  This does not
+        influence ongoing reception; stations will be added again when
+        new packets arrive."""
+        self.heard.clear()
 
 
 def main(stdscr: curses.window) -> None:

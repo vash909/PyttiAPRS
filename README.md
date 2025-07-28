@@ -99,10 +99,15 @@ The interface is non‑interactive beyond the commands; new packets appear as th
 
 | Key | Action |
 |---|---|
-| `m` | **Send message** – prompts for destination (addressee) and message text.  Messages follow the APRS message format `::DEST:Text{ID}` with a padded nine‑character addressee field and a maximum of ~67 characters.  A numeric ID is appended automatically to support acknowledgements. |
-| `p` | **Send position beacon** – transmits your configured latitude/longitude using the uncompressed format `!DDMM.mmN/DDDMM.mmE` and the selected symbol.  The default comment set in your configuration is appended; it is not prompted each time. |
-| `c` | **Configure station** – opens a form to edit any station parameter: callsign, tocall, digipeater path, latitude/longitude & directions, symbol table & code and default position comment.  Changes take effect immediately. |
+| `m` | **Send message** – prompts for destination (addressee) and message text. An optional numeric ID is appended to support acknowledgements when ACK is enabled. |
+| `p` | **Send position beacon** – transmits your configured latitude/longitude and symbol with the default comment. |
+| `c` | **Configure station** – edit callsign, tocall, digipeater path, position, symbol, comment, and KISS host/port. |
+| `x` | **Clear messages** – removes all packets currently displayed in the Messages panel (does not affect new incoming packets). |
+| `h` | **Clear heard list** – empties the list of callsigns shown in the Heard panel. |
+| `r` | **Repeat last message** – retransmits the most recent message you sent. Use this if you suspect it was not digipeated by a satellite or repeater. |
+| `a` | **Toggle ACK** – enables or disables inclusion of a message ID in outgoing messages. When ACK is OFF, no acknowledgements are expected. |
 | `q` | **Quit** – exits the program, closes the TNC connection and saves the current configuration. |
+
 
 When you send a packet, your own transmission appears in the messages panel with the current path.  Incoming packets show the digipeater path (`via ...`) so you can tell if your packets were digipeated and by whom.
 

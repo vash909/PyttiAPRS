@@ -629,6 +629,10 @@ class APRSTUI:
         # Stored as a tuple (destination, text, msg_id).  msg_id may be None
         # if acknowledgements are disabled when the message was sent.
         self.last_message: Optional[Tuple[str, str, Optional[int]]] = None
+        # Remember the most recently sent raw data packet (a payload without
+        # addressee formatting).  Stored as the raw text string.  When
+        # repeating, this text is re‑encoded and re‑sent with the same path.
+        self.last_raw: Optional[str] = None
 
     def run(self) -> None:
         """Main UI loop."""
@@ -664,6 +668,12 @@ class APRSTUI:
             # Toggle acknowledgements on/off
             elif c == ord('a'):
                 self.toggle_ack()
+            # Compose and send an arbitrary raw APRS payload
+            elif c == ord('d'):
+                self.compose_raw_data()
+            # Repeat the last raw APRS payload
+            elif c == ord('t'):
+                self.repeat_last_raw()
             # small sleep to reduce CPU
             time.sleep(0.05)
 
@@ -684,11 +694,18 @@ class APRSTUI:
         # toggling acknowledgements, and resending the last message.
         cmd_line = (
             "m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  "
-            "r:repeat  a:ack on/off  q:quit"
+            "d:raw  t:rep raw  r:repeat  a:ack on/off  q:quit"
         )
-        self.stdscr.addstr(1, 0, cmd_line[:width - 1], curses.A_DIM)
+        # Highlight the command bar to distinguish available keys.  Use
+        # reverse video for visibility; if reverse video is not available
+        # curses will fall back to a reasonable attribute.
+        self.stdscr.addstr(1, 0, cmd_line[:width - 1], curses.A_REVERSE)
         # Determine areas
-        msgs_height = height - 4
+        # Reserve two lines at the bottom (one blank and one for prompts) to
+        # ensure that input prompts do not overlap with the scrolling message
+        # area even when the screen is full.  With a height of N, messages and
+        # heard lists occupy up to rows 3..(N-3).
+        msgs_height = height - 5
         msgs_width = width - 20
         # Draw messages box
         self.stdscr.addstr(2, 0, "Received packets:", curses.A_BOLD)
@@ -740,7 +757,7 @@ class APRSTUI:
         heard_list = list(self.heard)
         # Use the same height as the messages area (height - 4) to avoid
         # drawing into the last line of the terminal reserved for user input.
-        heard_height = height - 4
+        heard_height = height - 5
         for i in range(min(heard_height, len(heard_list))):
             self.stdscr.addstr(3 + i, msgs_width, heard_list[i][:19])
 
@@ -772,10 +789,13 @@ class APRSTUI:
                 # Format ::CALLSIGN:ackNNN
                 if payload[10:13] == 'ack':
                     # ack for our message ID; just display
-                    self.messages.append((ts, src, dest, info, path))
+                    # Mark the digipeated path for display
+                    path_disp = self._mark_path_repeated(path)
+                    self.messages.append((ts, src, dest, info, path_disp))
                     continue
-            # Save message
-            self.messages.append((ts, src, dest, info, path))
+            # Save message with marked path for display
+            path_disp = self._mark_path_repeated(path)
+            self.messages.append((ts, src, dest, info, path_disp))
 
     # Prompt user for a string input
     def _prompt(self, prompt: str, default: str = '') -> Optional[str]:
@@ -791,17 +811,80 @@ class APRSTUI:
         finally:
             curses.noecho()
 
+    def _prompt_cancelable(self, prompt: str, default: str = '') -> Optional[str]:
+        """Prompt for input with the ability to cancel.
+
+        This method behaves similarly to `_prompt` but allows the user to
+        press the **Escape** key to abort input entirely.  If cancelled,
+        ``None`` is returned.  Backspace editing is supported.  A default
+        value is returned if the user simply presses Enter without
+        typing anything.
+
+        :param prompt: Prompt text to display at the beginning of the line.
+        :param default: Default value to return if the user submits an empty string.
+        :return: The string entered by the user, the default if empty,
+            or ``None`` if cancelled.
+        """
+        # Ensure we are in blocking mode during interactive input; the caller
+        # should have already set nodelay(False).
+        curses.echo()
+        # Clear bottom line and write prompt
+        bottom_y = curses.LINES - 1
+        self.stdscr.addstr(bottom_y, 0, ' ' * (curses.COLS - 1))
+        self.stdscr.addstr(bottom_y, 0, prompt)
+        self.stdscr.refresh()
+        # Build the input string character by character
+        buffer: List[str] = []
+        x_pos = len(prompt)
+        while True:
+            try:
+                ch = self.stdscr.getch()
+            except Exception:
+                continue
+            # Enter key (carriage return or newline) finalises input
+            if ch in (10, 13):
+                break
+            # Escape key cancels input
+            if ch == 27:  # ESC
+                curses.noecho()
+                return None
+            # Backspace handling (support DEL and Backspace)
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if buffer:
+                    buffer.pop()
+                    x_pos -= 1
+                    # Overwrite the last character with space and move cursor back
+                    self.stdscr.addstr(bottom_y, len(prompt) + x_pos, ' ')
+                    self.stdscr.move(bottom_y, len(prompt) + x_pos)
+                    self.stdscr.refresh()
+                continue
+            # Ignore other control characters
+            if ch < 32:
+                continue
+            # Add printable character
+            buffer.append(chr(ch))
+            self.stdscr.addch(bottom_y, len(prompt) + x_pos, ch)
+            x_pos += 1
+            self.stdscr.refresh()
+        curses.noecho()
+        # If no input provided and a default exists, return default
+        if not buffer:
+            return default if default else ''
+        return ''.join(buffer)
+
     # Compose and send an APRS message
     def _compose_message(self) -> None:
         # Temporarily disable non‑blocking input while composing a message
         self.stdscr.nodelay(False)
         self.stdscr.timeout(-1)
         try:
-            # Get destination callsign
-            dest = self._prompt("To station: ")
-            if not dest:
+            # Get destination callsign; allow cancellation with ESC
+            dest = self._prompt_cancelable("To station: ")
+            # None indicates cancellation
+            if dest is None or dest == '':
                 return
-            text = self._prompt("Message: ")
+            # Get message body; allow cancellation with ESC
+            text = self._prompt_cancelable("Message: ")
             if text is None:
                 return
             # Determine whether to include an acknowledgement ID.  When
@@ -819,8 +902,10 @@ class APRSTUI:
             self.tnc.send_frame(ax25)
             # Log our own outgoing message to the UI
             ts = time.time()
+            # Mark our path so that the last digipeater is displayed with '*'
+            path_disp = self._mark_path_repeated(list(self.cfg.path))
             self.messages.append(
-                (ts, self.cfg.callsign, dest, payload, list(self.cfg.path))
+                (ts, self.cfg.callsign, dest, payload, path_disp)
             )
             # Store last message for possible retransmission.  msg_id may be None
             # when acknowledgements are disabled.
@@ -846,8 +931,10 @@ class APRSTUI:
         )
         self.tnc.send_frame(ax25)
         ts = time.time()
+        # Mark path for display
+        path_disp = self._mark_path_repeated(list(self.cfg.path))
         self.messages.append(
-            (ts, self.cfg.callsign, '', payload, list(self.cfg.path))
+            (ts, self.cfg.callsign, '', payload, path_disp)
         )
 
     # Edit configuration interactively
@@ -952,6 +1039,24 @@ class APRSTUI:
         new packets arrive."""
         self.heard.clear()
 
+    def _mark_path_repeated(self, path: List[str]) -> List[str]:
+        """Return a copy of the path list with the last element marked as repeated.
+
+        In APRS notation a digipeater that has already repeated a packet is
+        indicated by a trailing asterisk (`*`) appended to its callsign.  Since
+        the low‑level AX.25 decoder used here does not expose the H‑bit, this
+        function appends a '*' to the last digipeater in the list as a simple
+        approximation.  If the path is empty, an empty list is returned.
+
+        :param path: Sequence of digipeaters extracted from the AX.25 header.
+        :return: A new list where the last element, if any, is suffixed with '*'.
+        """
+        if not path:
+            return []
+        marked = path.copy()
+        marked[-1] = f"{marked[-1]}*"
+        return marked
+
     def toggle_ack(self) -> None:
         """Toggle the inclusion of message acknowledgements on outgoing messages.
 
@@ -986,7 +1091,73 @@ class APRSTUI:
         self.tnc.send_frame(ax25)
         ts = time.time()
         # Log retransmitted message in the UI
-        self.messages.append((ts, self.cfg.callsign, dest, payload, list(self.cfg.path)))
+        path_disp = self._mark_path_repeated(list(self.cfg.path))
+        self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+
+    def compose_raw_data(self) -> None:
+        """Prompt the user to enter a raw APRS payload and transmit it.
+
+        Raw packets consist solely of user‑supplied text with no padded
+        addressee or message ID.  They are sent using the configured
+        TOCALL as the AX.25 destination and the currently configured
+        digipeater path.  The raw payload is logged to the UI with an
+        empty destination field so it displays as an unaddressed packet.
+        """
+        # Temporarily disable non‑blocking input while composing raw data
+        self.stdscr.nodelay(False)
+        self.stdscr.timeout(-1)
+        try:
+            text = self._prompt_cancelable("Raw data: ")
+            # Cancelled or empty: return without sending
+            if text is None or text == '':
+                return
+            # Encode the raw text as Latin‑1 to preserve bytes; APRS payloads
+            # are typically ASCII but this allows extended characters.  Do not
+            # append any message ID.
+            try:
+                payload = text.encode('latin1')
+            except Exception:
+                payload = text.encode('ascii', errors='replace')
+            ax25 = encode_ax25_frame(
+                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+            )
+            self.tnc.send_frame(ax25)
+            ts = time.time()
+            # Log the transmission and display the TOCALL as the destination.  Even
+            # though the payload is unaddressed, including TOCALL in the UI
+            # clarifies which software identifier was used.
+            path_disp = self._mark_path_repeated(list(self.cfg.path))
+            self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+            # Remember this raw payload for potential retransmission
+            self.last_raw = text
+        finally:
+            # Restore non‑blocking mode
+            self.stdscr.nodelay(True)
+            self.stdscr.timeout(100)
+
+    def repeat_last_raw(self) -> None:
+        """Retransmit the most recently sent raw data packet.
+
+        If a raw payload has been sent previously, this method re‑encodes
+        it and sends it again using the current TOCALL and digipeater
+        path.  The repeat is logged to the UI.  If no raw packet has
+        been sent yet, this method does nothing.
+        """
+        if not self.last_raw:
+            return
+        text = self.last_raw
+        try:
+            payload = text.encode('latin1')
+        except Exception:
+            payload = text.encode('ascii', errors='replace')
+        ax25 = encode_ax25_frame(
+            self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+        )
+        self.tnc.send_frame(ax25)
+        ts = time.time()
+        # Display the TOCALL as the destination in the UI for raw repeats
+        path_disp = self._mark_path_repeated(list(self.cfg.path))
+        self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
 
 
 def main(stdscr: curses.window) -> None:

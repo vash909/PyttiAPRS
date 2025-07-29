@@ -1,4 +1,5 @@
 
+
 # PyttiAPRS TUI Client – User Guide & Technical Notes
 
 This document serves as both a **user guide** and a **technical overview** for the APRS TUI Client, a Python application that enables APRS messaging via a KISS‑compatible TNC.  The aim is to help end‑users operate the software confidently while providing enough technical context to understand how it works internally.
@@ -89,6 +90,10 @@ The curses‑based interface consists of three areas:
 
 A command bar under the header lists the available **single‑character commands**.
 
+  The header also shows whether message acknowledgements are enabled (`ACK ON`/`ACK OFF`).  When a packet is digipeated, the last digipeater in its path is marked with an asterisk (`*`) – for example, a packet repeated by the ISS via `RS0ISS` will display the path as `RS0ISS*`.  This provides quick feedback on which digipeater repeated your transmission.
+
+  During message or raw packet entry, you can press **Escape** to cancel the current entry and return to the main interface without sending.
+
 ### Navigating
 
 The interface is non‑interactive beyond the commands; new packets appear as they arrive.  If the screen fills with messages, old entries scroll off the top but remain in memory for the duration of the session.
@@ -99,13 +104,15 @@ The interface is non‑interactive beyond the commands; new packets appear as th
 
 | Key | Action |
 |---|---|
-| `m` | **Send message** – prompts for destination (addressee) and message text. An optional numeric ID is appended to support acknowledgements when ACK is enabled. |
+| `m` | **Send message** – prompts for destination (addressee) and message text.  If acknowledgements are enabled, a numeric ID is appended automatically. |
 | `p` | **Send position beacon** – transmits your configured latitude/longitude and symbol with the default comment. |
-| `c` | **Configure station** – edit callsign, tocall, digipeater path, position, symbol, comment, and KISS host/port. |
+| `c` | **Configure station** – edit callsign, TOCALL, digipeater path, position, symbol, comment, and KISS host/port. |
 | `x` | **Clear messages** – removes all packets currently displayed in the Messages panel (does not affect new incoming packets). |
 | `h` | **Clear heard list** – empties the list of callsigns shown in the Heard panel. |
-| `r` | **Repeat last message** – retransmits the most recent message you sent. Use this if you suspect it was not digipeated by a satellite or repeater. |
-| `a` | **Toggle ACK** – enables or disables inclusion of a message ID in outgoing messages. When ACK is OFF, no acknowledgements are expected. |
+| `d` | **Send raw packet** – prompts for an arbitrary APRS payload string and sends it as‑is, without a padded addressee or message ID.  The configured TOCALL is used as the AX.25 destination. |
+| `t` | **Repeat last raw packet** – retransmits the most recently sent raw payload.  Useful if you suspect a broadcast (e.g. `CQ` call) was not digipeated. |
+| `r` | **Repeat last message** – retransmits the most recent addressed message you sent (with the same ID if ACK is enabled). |
+| `a` | **Toggle ACK** – enables or disables inclusion of a message ID in outgoing messages.  When ACK is OFF, no acknowledgements are expected. |
 | `q` | **Quit** – exits the program, closes the TNC connection and saves the current configuration. |
 
 
@@ -213,8 +220,7 @@ Contributions are welcome!  To submit a patch:
 3. Commit your changes with descriptive messages.
 4. Open a pull request explaining your work.
 
-Before submitting, please run `python3 -m py_compile aprs_tui.py` to ensure there are no syntax errors.  Enhancements may include APRS‑IS connectivity, periodic beaconing, message retries, UI improvements or additional protocol support (e.g. AGWPE).
+Before submitting, please run `python3 -m py_compile PyttiAPRS.py` to ensure there are no syntax errors.  Enhancements may include APRS‑IS connectivity, periodic beaconing, message retries, UI improvements or additional protocol support (e.g. AGWPE).
 
 ---
 
-*This guide was generated to accompany the PyttiAPRS TUI Client and summarises both user operations and internal protocol details.  It references the APRS specification for message and position formatsm.packet-radio.net/packet/aprs-wb2osz/Understanding-APRS-Packets.pdf#:~:text=2.5.1%20Simple%20Case%20,onlyhttps://raw.githubusercontent.com/python-aprs/aprs3/main/aprs/position.py#:~:text=lat%2C%20long%2C%20sym_table_id%2C%20symbol_code%2C%20ambiguity%3DNone%2C, and explains KISS framinghttps://thomask.sdf.org/blog/2018/12/15/sending-raw-ax25-python.html#:~:text=There%20are%20four%20main%20steps,involved for developers interested in extending the software.*

@@ -69,7 +69,9 @@ On the first run, the client prompts you for several **station parameters**:
 
 1. **Callsign & SSID** (e.g. `IK2ABC-7`).
 2. **Software identifier** (TOCALL) – a six‑character identifier; default is `APZ001` - In satellite comms you should use your WW Locator.
+   Callsigns and TOCALL are case‑insensitive; any lowercase input is converted to uppercase automatically.
 3. **Digipeater path** – a comma‑ or space‑separated list of digipeaters (e.g. `WIDE2-2,ARISS`).  Hyphens are preserved inside callsigns.
+   The path is stored internally in uppercase, regardless of how you type it.
 4. **Latitude & Direction** – enter the numeric degrees (e.g. `45.67`) and select `N` or `S`.
 5. **Longitude & Direction** – numeric degrees (e.g. `7.89`) and select `E` or `W`.
 6. **Symbol table & code** – determines the icon shown on APRS maps.  Table `/` is primary and `\` is secondary; the code is a single character (e.g. `>` for a mobile).  Refer to APRS Symbol Chart for options.
@@ -89,9 +91,11 @@ The curses‑based interface consists of three areas:
 - **Messages Panel** (left) – lists received and sent packets with time, source, destination (if any), path and payload.  Your configured callsign is highlighted wherever it appears.
 - **Heard Panel** (right) – lists unique stations heard.
 
-A command bar under the header lists the available **single‑character commands**.
+A command bar under the header lists the available **single‑character commands** and is displayed in reverse video for clarity.
 
-  The header also shows whether message acknowledgements are enabled (`ACK ON`/`ACK OFF`).  When a packet is digipeated, the last digipeater in its path is marked with an asterisk (`*`) – for example, a packet repeated by the ISS via `RS0ISS` will display the path as `RS0ISS*`.  This provides quick feedback on which digipeater repeated your transmission.
+  The header also shows whether message acknowledgements are enabled (`ACK ON`/`ACK OFF`).  When a packet is digipeated, the digipeater that has actually retransmitted your frame is marked with an asterisk (`*`) – for example, a packet repeated by the ISS via `RS0ISS` will display the path as `RS0ISS*`.  This marker is derived from the **H bit** in the AX.25 SSID and therefore only appears when a repeater has really repeated your packet.
+
+  You can **click** on a callsign in the Heard panel using the mouse.  The clicked callsign becomes highlighted and is used as the default destination for subsequent messages.  If you press one of the quick‑reply keys (see below), the message is sent immediately to the selected station without prompting for a destination.  Clicking anywhere else in the Heard panel clears the selection.
 
   During message or raw packet entry, you can press **Escape** to cancel the current entry and return to the main interface without sending.
 
@@ -105,7 +109,7 @@ The interface is non‑interactive beyond the commands; new packets appear as th
 
 | Key | Action |
 |---|---|
-| `m` | **Send message** – prompts for destination (addressee) and message text.  If acknowledgements are enabled, a numeric ID is appended automatically. |
+| `m` | **Send message** – prompts for destination (addressee) and message text.  If you have selected a station in the Heard list via mouse click, its callsign becomes the default destination (press Enter to accept it).  If acknowledgements are enabled, a numeric ID is appended automatically. |
 | `p` | **Send position beacon** – transmits your configured latitude/longitude and symbol with the default comment. |
 | `c` | **Configure station** – edit callsign, TOCALL, digipeater path, position, symbol, comment, and KISS host/port. |
 | `x` | **Clear messages** – removes all packets currently displayed in the Messages panel (does not affect new incoming packets). |
@@ -113,6 +117,8 @@ The interface is non‑interactive beyond the commands; new packets appear as th
 | `d` | **Send raw packet** – prompts for an arbitrary APRS payload string and sends it as‑is, without a padded addressee or message ID.  The configured TOCALL is used as the AX.25 destination. |
 | `t` | **Repeat last raw packet** – retransmits the most recently sent raw payload.  Useful if you suspect a broadcast (e.g. `CQ` call) was not digipeated. |
 | `r` | **Repeat last message** – retransmits the most recent addressed message you sent (with the same ID if ACK is enabled). |
+| `1` | **Quick “QSL? 73”** – sends a one‑line message containing `QSL? 73` to the selected station in the Heard list.  If no station is selected, you will be prompted to enter a destination callsign. |
+| `2` | **Quick “QSL! 73”** – sends a one‑line message containing `QSL! 73` to the selected station or prompts for a destination if none is selected. |
 | `a` | **Toggle ACK** – enables or disables inclusion of a message ID in outgoing messages.  When ACK is OFF, no acknowledgements are expected. |
 | `q` | **Quit** – exits the program, closes the TNC connection and saves the current configuration. |
 
@@ -123,7 +129,7 @@ When you send a packet, your own transmission appears in the messages panel with
 
 ## Station Configuration
 
-Pressing `c` invokes the configuration editor.  Inputs are taken at the bottom of the screen; if prompts disappear quickly, they will reappear when you begin typing.  Fields include:
+Pressing `c` invokes the configuration editor.  Inputs are taken at the bottom of the screen; if prompts disappear quickly, they will reappear when you begin typing.  Callsign, TOCALL and digipeater path values are converted to uppercase automatically for consistency.  Fields include:
 
 - **Callsign** – update your callsign/SSID.
 - **TOCALL** – identifies the software; six characters max.

@@ -1,5 +1,6 @@
 
 
+
 # PyttiAPRS TUI Client – User Guide & Technical Notes
 
 This document serves as both a **user guide** and a **technical overview** for the APRS TUI Client, a Python application that enables APRS messaging via a KISS‑compatible TNC.  The aim is to help end‑users operate the software confidently while providing enough technical context to understand how it works internally.
@@ -220,7 +221,7 @@ Contributions are welcome!  To submit a patch:
 3. Commit your changes with descriptive messages.
 4. Open a pull request explaining your work.
 
-Before submitting, please run `python3 -m py_compile PyttiAPRS.py` to ensure there are no syntax errors.  Enhancements may include APRS‑IS connectivity, periodic beaconing, message retries, UI improvements or additional protocol support (e.g. AGWPE).
+Before submitting, please run `python3 -m py_compile aprs_tui.py` to ensure there are no syntax errors.  Enhancements may include APRS‑IS connectivity, periodic beaconing, message retries, UI improvements or additional protocol support (e.g. AGWPE).
 
 ---
 

@@ -279,40 +279,62 @@ def encode_ax25_frame(dest: str, source: str, path: List[str], info: bytes) -> b
 def decode_ax25_frame(frame: bytes) -> Optional[Tuple[str, str, List[str], bytes]]:
     """Decode a raw AX.25 frame into (dest, source, path list, info).
 
-    This function understands only UI frames with a control byte of
-    0x03 and a PID of 0xF0.  If the frame does not match this pattern
-    ``None`` is returned.  Addresses are decoded until the last flag is
-    encountered as described in :func:`encode_ax25_address`.
+    This decoder handles only UI frames (control=0x03, PID=0xF0).  It
+    extracts destination, source and digipeater addresses.  Each
+    digipeater in the returned path is suffixed with a `*` if the
+    ``has‑been‑repeated" (H) bit was set in its SSID octet.  The H bit
+    is bit 7 (0x80) of the SSID byte; the extension bit (E) at bit 0
+    marks the last address in the list.  Callsigns and SSIDs are
+    converted to strings (e.g. ``OH7RDA-7``).  The destination and
+    source are never marked with ``*`` because repeaters only set
+    the H bit on digipeater addresses.
 
     :param frame: Raw AX.25 frame without flags or FCS.
     :return: Tuple of (destination callsign, source callsign,
-        path list, info bytes) or ``None`` if unsupported.
+        list of digipeaters (with '*' indicating repeat), info bytes) or
+        ``None`` if the frame is not a UI frame or is malformed.
     """
     # Minimum length: dest(7) + src(7) + ctrl(1) + pid(1)
     if len(frame) < 16:
         return None
-    # Iterate through address fields
-    addresses = []
+    addresses = []  # will store tuples (call, ssid, h_bit, e_bit)
     idx = 0
     last_found = False
+    # Extract address fields.  Stop when the E (extension) bit (bit 0)
+    # is set, indicating the last address.  Each address is seven
+    # bytes: 6 shifted characters + SSID byte.
     while not last_found and idx + 7 <= len(frame):
         addr_bytes = frame[idx:idx + 7]
-        call, ssid, last = decode_ax25_address(addr_bytes)
-        addresses.append(f"{call}-{ssid}" if ssid else call)
-        last_found = last
+        # Decode callsign by shifting right by one bit and stripping
+        call = ''.join(chr((b >> 1) & 0x7F) for b in addr_bytes[:6]).strip()
+        ssid = (addr_bytes[6] >> 1) & 0x0F
+        h_bit = bool(addr_bytes[6] & 0x80)
+        e_bit = bool(addr_bytes[6] & 0x01)
+        addresses.append((call, ssid, h_bit, e_bit))
+        last_found = e_bit
         idx += 7
-    # At least two addresses (dest + source)
+    # Need at least destination and source
     if len(addresses) < 2:
         return None
-    dest, source = addresses[0], addresses[1]
-    path = addresses[2:]
-    # Extract control and PID
+    # Convert destination and source to strings
+    dest_call, dest_ssid, _, _ = addresses[0]
+    src_call, src_ssid, _, _ = addresses[1]
+    dest = f"{dest_call}-{dest_ssid}" if dest_ssid else dest_call
+    source = f"{src_call}-{src_ssid}" if src_ssid else src_call
+    # Build path list with '*' for digipeaters whose H bit was set
+    path: List[str] = []
+    for call, ssid, h_bit, _ in addresses[2:]:
+        callstr = f"{call}-{ssid}" if ssid else call
+        if h_bit:
+            callstr += '*'
+        path.append(callstr)
+    # Verify sufficient length for control and PID
     if idx + 2 > len(frame):
         return None
     control = frame[idx]
     pid = frame[idx + 1]
+    # Only handle UI frames (0x03) with no Layer 3 (0xF0)
     if control != 0x03 or pid != 0xF0:
-        # Only UI frames with no L3
         return None
     info = frame[idx + 2:]
     return dest, source, path, info
@@ -634,6 +656,34 @@ class APRSTUI:
         # repeating, this text is re‑encoded and re‑sent with the same path.
         self.last_raw: Optional[str] = None
 
+        # Record the last callsign clicked in the heard list.  When set,
+        # message composition prompts will default to this destination and
+        # quick‑message commands will automatically target it unless the user
+        # overrides the address.  This aids mouse‑based operation.
+        self.selected_heard: Optional[str] = None
+
+        # Keep track of the list of heard stations as rendered in the last
+        # screen draw.  This list is sorted alphabetically to provide a
+        # stable order between draws and mouse events.  It is updated in
+        # `_draw()` and used in the mouse handler to map click positions
+        # back to callsigns.  Without this mapping, converting the
+        # unordered `self.heard` set to a list in both places could
+        # yield different orders, causing clicks to select the wrong
+        # callsign or none at all.
+        self.current_heard_list: List[str] = []
+
+        # Enable mouse support so that clicks within the heard list can
+        # select a callsign for quick messaging.  All mouse events are
+        # reported; actual handling occurs in the main loop.
+        try:
+            # Enable reporting of all mouse events.  Setting mouseinterval(0)
+            # causes button press and release events to be reported without
+            # needing a click & release combination.
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+            curses.mouseinterval(0)
+        except Exception:
+            pass
+
     def run(self) -> None:
         """Main UI loop."""
         while True:
@@ -649,6 +699,11 @@ class APRSTUI:
                 break
             # Compose and send a message
             elif c == ord('m'):
+                # Compose and send a message.  If a callsign has been
+                # selected in the heard list via mouse click, use it as
+                # the default destination so that the user can simply
+                # press Enter to accept it.  Otherwise no default is
+                # provided and the user must enter a destination.
                 self._compose_message()
             # Send a position beacon
             elif c == ord('p'):
@@ -674,6 +729,48 @@ class APRSTUI:
             # Repeat the last raw APRS payload
             elif c == ord('t'):
                 self.repeat_last_raw()
+            # Quick message shortcuts: send QSL? 73 or QSL! 73.  These
+            # commands allow rapid replies without manual typing.  The
+            # destination is taken from the currently selected callsign
+            # if one is selected; otherwise the user is prompted.
+            elif c == ord('1'):
+                self._send_quick_message("QSL? 73")
+            elif c == ord('2'):
+                self._send_quick_message("QSL! 73")
+
+            # Handle mouse clicks.  When the user clicks within the
+            # heard list, record the selected callsign so that
+            # subsequent message commands can use it as the default
+            # destination.  If the click occurs outside the list, clear
+            # any previous selection.
+            elif c == curses.KEY_MOUSE:
+                try:
+                    _, mx, my, _, bstate = curses.getmouse()
+                except Exception:
+                    bstate = 0
+                # Only handle button presses (not releases) and ensure
+                # coordinates are valid relative to the current layout.
+                if bstate & curses.BUTTON1_PRESSED:
+                    # Compute bounds for heard list
+                    height, width = self.stdscr.getmaxyx()
+                    msgs_width = width - 20
+                    # Heard list starts at row 3 and spans up to
+                    # height-5 rows.  Columns start at msgs_width.
+                    start_row = 3
+                    end_row = start_row + (height - 5) - 1
+                    if my >= start_row and my <= end_row and mx >= msgs_width:
+                        # Determine which item was clicked.  Use the
+                        # current_heard_list computed in _draw() to map
+                        # row indices to callsigns, ensuring consistent
+                        # ordering between display and selection.
+                        index = my - start_row
+                        if 0 <= index < len(self.current_heard_list):
+                            self.selected_heard = self.current_heard_list[index]
+                        else:
+                            self.selected_heard = None
+                    else:
+                        # Click outside heard list clears selection
+                        self.selected_heard = None
             # small sleep to reduce CPU
             time.sleep(0.05)
 
@@ -694,7 +791,7 @@ class APRSTUI:
         # toggling acknowledgements, and resending the last message.
         cmd_line = (
             "m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  "
-            "d:raw  t:rep raw  r:repeat  a:ack on/off  q:quit"
+            "d:raw  t:rep raw  r:repeat  1:QSL?  2:QSL!  a:ack on/off  q:quit"
         )
         # Highlight the command bar to distinguish available keys.  Use
         # reverse video for visibility; if reverse video is not available
@@ -754,12 +851,25 @@ class APRSTUI:
         # constraint the heard list would overwrite the prompt line when the
         # screen is full, causing the input prompt to appear mid‑screen.
         self.stdscr.addstr(2, msgs_width, "Heard:", curses.A_BOLD)
-        heard_list = list(self.heard)
+        # Convert the heard set into a sorted list to provide a stable
+        # ordering for display and mouse selection.  Store it on
+        # self.current_heard_list so the mouse handler can map row
+        # indices to callsigns reliably.
+        heard_list = sorted(self.heard)
+        self.current_heard_list = heard_list
         # Use the same height as the messages area (height - 4) to avoid
         # drawing into the last line of the terminal reserved for user input.
         heard_height = height - 5
         for i in range(min(heard_height, len(heard_list))):
-            self.stdscr.addstr(3 + i, msgs_width, heard_list[i][:19])
+            call = heard_list[i]
+            row = 3 + i
+            # Highlight the selected callsign if it matches the clicked
+            # item.  Use the same highlight attribute as used for our
+            # own callsign to improve visibility.
+            if self.selected_heard and call.upper() == self.selected_heard.upper():
+                self.stdscr.addstr(row, msgs_width, call[:19], self._highlight_attr)
+            else:
+                self.stdscr.addstr(row, msgs_width, call[:19])
 
         # Draw a vertical separator between the message area and the heard list
         # for a cleaner layout.  Use ACS_VLINE if available; otherwise fall back
@@ -787,15 +897,12 @@ class APRSTUI:
                 except Exception:
                     payload = ''
                 # Format ::CALLSIGN:ackNNN
-                if payload[10:13] == 'ack':
+                if len(payload) >= 13 and payload[10:13] == 'ack':
                     # ack for our message ID; just display
-                    # Mark the digipeated path for display
-                    path_disp = self._mark_path_repeated(path)
-                    self.messages.append((ts, src, dest, info, path_disp))
+                    self.messages.append((ts, src, dest, info, path))
                     continue
-            # Save message with marked path for display
-            path_disp = self._mark_path_repeated(path)
-            self.messages.append((ts, src, dest, info, path_disp))
+            # Save message; display the path exactly as provided by the TNC
+            self.messages.append((ts, src, dest, info, path))
 
     # Prompt user for a string input
     def _prompt(self, prompt: str, default: str = '') -> Optional[str]:
@@ -878,11 +985,19 @@ class APRSTUI:
         self.stdscr.nodelay(False)
         self.stdscr.timeout(-1)
         try:
-            # Get destination callsign; allow cancellation with ESC
-            dest = self._prompt_cancelable("To station: ")
-            # None indicates cancellation
+            # Get destination callsign; allow cancellation with ESC.  If a
+            # callsign has been selected via mouse, use it as the default
+            # value so that pressing Enter accepts it.  Otherwise the
+            # default is empty and the user must type a destination.
+            default_dest = self.selected_heard or ''
+            dest = self._prompt_cancelable("To station: ", default_dest)
+            # None indicates cancellation.  If the user presses Enter
+            # without entering anything and no default is set, dest will be
+            # an empty string; treat this as a cancellation as well.
             if dest is None or dest == '':
                 return
+            # Convert destination to upper case for consistency
+            dest = dest.strip().upper()
             # Get message body; allow cancellation with ESC
             text = self._prompt_cancelable("Message: ")
             if text is None:
@@ -903,10 +1018,9 @@ class APRSTUI:
             # Log our own outgoing message to the UI
             ts = time.time()
             # Mark our path so that the last digipeater is displayed with '*'
-            path_disp = self._mark_path_repeated(list(self.cfg.path))
-            self.messages.append(
-                (ts, self.cfg.callsign, dest, payload, path_disp)
-            )
+            # Display the configured path as is without marking the last hop.
+            path_disp = list(self.cfg.path)
+            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
             # Store last message for possible retransmission.  msg_id may be None
             # when acknowledgements are disabled.
             self.last_message = (dest, text, msg_id)
@@ -932,10 +1046,9 @@ class APRSTUI:
         self.tnc.send_frame(ax25)
         ts = time.time()
         # Mark path for display
-        path_disp = self._mark_path_repeated(list(self.cfg.path))
-        self.messages.append(
-            (ts, self.cfg.callsign, '', payload, path_disp)
-        )
+        # Display the configured path as is without marking the last hop
+        path_disp = list(self.cfg.path)
+        self.messages.append((ts, self.cfg.callsign, '', payload, path_disp))
 
     # Edit configuration interactively
     def _edit_config(self) -> None:
@@ -947,7 +1060,8 @@ class APRSTUI:
                 f"Callsign (current {self.cfg.callsign}): ", self.cfg.callsign
             )
             if new_call:
-                self.cfg.callsign = new_call.strip()
+                # Always store callsign in uppercase
+                self.cfg.callsign = new_call.strip().upper()
             new_tocall = self._prompt(
                 f"Tocall (software id) (current {self.cfg.tocall}): ", self.cfg.tocall
             )
@@ -1091,7 +1205,8 @@ class APRSTUI:
         self.tnc.send_frame(ax25)
         ts = time.time()
         # Log retransmitted message in the UI
-        path_disp = self._mark_path_repeated(list(self.cfg.path))
+        # Use the configured path as is for display
+        path_disp = list(self.cfg.path)
         self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
 
     def compose_raw_data(self) -> None:
@@ -1126,7 +1241,8 @@ class APRSTUI:
             # Log the transmission and display the TOCALL as the destination.  Even
             # though the payload is unaddressed, including TOCALL in the UI
             # clarifies which software identifier was used.
-            path_disp = self._mark_path_repeated(list(self.cfg.path))
+            # Display the configured path as is
+            path_disp = list(self.cfg.path)
             self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
             # Remember this raw payload for potential retransmission
             self.last_raw = text
@@ -1156,8 +1272,50 @@ class APRSTUI:
         self.tnc.send_frame(ax25)
         ts = time.time()
         # Display the TOCALL as the destination in the UI for raw repeats
-        path_disp = self._mark_path_repeated(list(self.cfg.path))
+        # Display the configured path as is
+        path_disp = list(self.cfg.path)
         self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+
+    def _send_quick_message(self, quick_text: str) -> None:
+        """Send a predefined APRS message quickly.
+
+        Quick messages are common phrases like "QSL? 73" or "QSL! 73".
+        If the user has clicked on a callsign in the heard list, that
+        callsign is used as the default destination.  Otherwise the
+        user is prompted for a destination.  The message is sent with
+        the current acknowledgement setting.
+
+        :param quick_text: The message body to send.
+        """
+        # Temporarily disable non‑blocking input during prompting
+        self.stdscr.nodelay(False)
+        self.stdscr.timeout(-1)
+        try:
+            # If a callsign has been selected via the mouse, send the
+            # quick message directly without prompting.  Otherwise prompt
+            # for a destination.
+            if self.selected_heard:
+                dest = self.selected_heard.strip().upper()
+            else:
+                dest = self._prompt_cancelable("To station: ")
+                if dest is None or dest == '':
+                    return
+                dest = dest.strip().upper()
+            # Determine message ID if acknowledgements are enabled
+            msg_id = self.cfg.next_msg_id() if self.ack_enabled else None
+            payload = build_aprs_message(dest, quick_text, msg_id=msg_id)
+            ax25 = encode_ax25_frame(
+                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+            )
+            self.tnc.send_frame(ax25)
+            ts = time.time()
+            path_disp = list(self.cfg.path)
+            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+            # Update last_message record for potential repeat
+            self.last_message = (dest, quick_text, msg_id)
+        finally:
+            self.stdscr.nodelay(True)
+            self.stdscr.timeout(100)
 
 
 def main(stdscr: curses.window) -> None:
@@ -1195,7 +1353,7 @@ def main(stdscr: curses.window) -> None:
         stdscr.addstr(0, 0, "Enter your callsign (e.g. IK2ABC-7): ")
         stdscr.refresh()
         callsign = stdscr.getstr().decode('utf-8').strip()
-        cfg.callsign = callsign
+        cfg.callsign = callsign.upper()
         curses.noecho()
         # Optionally ask tocall
         curses.echo()

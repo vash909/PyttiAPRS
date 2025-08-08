@@ -961,22 +961,15 @@ class APRSTUI:
             if dest:
                 dest_cols.append(dest)
             dest_cols.extend(path)
-            dest_display = '   '.join(dest_cols)
+            dest_display = ' '.join(dest_cols)
 
             # Assemble the line.  When a destination is present include
             # the '>' symbol; otherwise omit it (beacons and raw
             # packets).  If no destination or path is present, the
-            # message is considered to be from the sender only.
-            if dest:
-                if dest_display:
-                    line = f"{timestr} {src_display}> {dest_display}: {text}"
-                else:
-                    line = f"{timestr} {src_display}> : {text}"
-            else:
-                if dest_display:
-                    line = f"{timestr} {src_display} {dest_display}: {text}"
-                else:
-                    line = f"{timestr} {src_display}: {text}"
+            # message is considered to be from the sender only.            # Assemble the line. Always include '>' after the padded source,
+            # even if there is no destination/path (beacon without path).
+            src_part = f"{timestr} {src_display}> "
+            line = f"{src_part}{dest_display}: {text}" if dest_display else f"{src_part}: {text}"
             # Truncate line to available width
             truncated = line[: msgs_width - 1]
             # Highlight our callsign if present

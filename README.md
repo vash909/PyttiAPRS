@@ -1,4 +1,3 @@
-PyttiAPRS — README (Updated 2025-08-08)
 
 Overview
 --------

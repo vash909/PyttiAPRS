@@ -9,15 +9,20 @@ What’s new today (2025-08-08)
 -----------------------------
 • Configurable quick messages: keys **1** and **2** send phrases read from the JSON
   config file (`quick_msg1`, `quick_msg2`). The command bar shows the configured text.
+  
 • RX/TX header parity: for transmitted packets, the field after `>` now shows the
   configured **TOCALL** (matching what you see for RX). The APRS message addressee
   stays inside the payload (`::ADDRESSEE:...`).
+  
 • Aligned `>` on the source: the source callsign field is padded so that the `>`
   character is vertically aligned across lines. No extra padding is applied to
   destination and digipeater callsigns; they are simply separated by spaces.
+  
 • File logging: every RX/TX packet is appended to a configurable log file
   (`log_file`), including timestamp, header, and payload.
+  
 • Dynamic command bar: shows the actual text of the configured quick replies.
+
 • Mouse quick-select: click a callsign in the “Heard” pane to make it the default
   destination for messages/quick replies (existing feature, now documented).
 
@@ -76,18 +81,23 @@ Technical notes
 ---------------
 • APRS message payload uses `::ADDRESSEE:TEXT{ID}` (ADDRESSEE padded to 9 chars;
   ID optional when ACK is enabled).
+  
 • Position beacons: APRS uncompressed format with configurable symbol/table and comment.
+
 • TX uses your TOCALL as the AX.25 destination; the APRS addressee remains in the payload.
 
 Known limitations
 -----------------
 • Only AX.25 UI frames are encoded/decoded (control=0x03, PID=0xF0). No connected-mode sessions.
+
 • No automatic retry for unacknowledged messages (use `r` to manually resend).
 
 Operational tips
 ----------------
 • For satellite operation you may prefer to disable ACKs (`a`).
+
 • With quick replies, first click the target in the “Heard” list to send without typing.
+
 • Keep the path minimal to reduce channel congestion.
 
 Changelog (2025-08-08)

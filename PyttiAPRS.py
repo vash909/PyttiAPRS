@@ -155,11 +155,6 @@ def save_config(cfg: 'StationConfig') -> None:
     host and port).  The message ID counter is not saved because it
     should reset with each run.
     """
-    # Persist all user configurable fields, including quick messages and log file.
-    # The message ID counter is intentionally omitted so that IDs reset on
-    # each run.  Future configuration keys added here should be loaded
-    # in ``load_saved_config`` and passed through to ``StationConfig`` in
-    # ``main``.
     data = {
         'callsign': cfg.callsign,
         'tocall': cfg.tocall,
@@ -603,18 +598,7 @@ class TNCConnection:
 
 @dataclass
 class StationConfig:
-    """Configuration parameters for the station.
-
-    In addition to standard APRS parameters such as callsign, destination
-    callsign (``tocall``) and digipeater path, this configuration holds
-    two predefined quick‑reply messages and a log file path.  The
-    ``quick_msg1`` and ``quick_msg2`` fields correspond to the
-    single‑digit shortcuts ``1`` and ``2`` in the user interface.  If
-    present in the configuration file, these values override the built‑in
-    defaults ``"QSL? 73"`` and ``"QSL! 73"``.  The ``log_file`` field
-    specifies where to append a textual record of all transmitted and
-    received packets; if unset or ``None``, logging is disabled.
-    """
+    """Configuration parameters for the station."""
     callsign: str  # e.g. "IK2ABC-7"
     tocall: str    # software identifier, e.g. "APZ001"
     path: List[str] = field(default_factory=lambda: [])
@@ -624,25 +608,16 @@ class StationConfig:
     symbol_code: str = '>'
     host: str = 'localhost'
     port: int = 8001
-    # Message ID counter used when acknowledgements are enabled.  This
-    # counter wraps back to 1 after reaching 999.
     msg_id_counter: int = 1
-    # Default position beacon comment
-    pos_comment: str = ''
-    # Predefined quick reply messages for keys 1 and 2
-    quick_msg1: str = "QSL? 73"
-    quick_msg2: str = "QSL! 73"
-    # Log file path; if None or empty no log will be written
-    log_file: Optional[str] = 'aprs_tui.log'
+    pos_comment: str = ''  # default comment for position beacons
+    quick_msg1: str = 'QSL? 73'
+    quick_msg2: str = 'QSL! 73'
+    log_file: str = 'aprs_tui.log'
 
     def next_msg_id(self) -> int:
-        """Return the next sequential message ID and update the counter.
-
-        The counter is reset to 1 after reaching 999 so that IDs remain
-        within the three‑digit range specified by the APRS standard.
-        """
         mid = self.msg_id_counter
         self.msg_id_counter += 1
+        # Wrap around after 999 to keep ID within three digits
         if self.msg_id_counter > 999:
             self.msg_id_counter = 1
         return mid
@@ -659,6 +634,7 @@ class APRSTUI:
         # The path is a list of digipeaters through which the packet travelled.
         self.messages: List[Tuple[float, str, str, bytes, List[str]]] = []
         self.heard: set = set()
+        self.heard_times: dict = {}
         self.msg_queue: queue.Queue = tnc.msg_queue
         # Setup curses
         curses.curs_set(0)
@@ -715,88 +691,6 @@ class APRSTUI:
         except Exception:
             pass
 
-        # Prepare logging.  If a log file is configured, messages
-        # transmitted and received will be appended to this file.  The
-        # filename is taken from ``self.cfg.log_file``; if this value is
-        # ``None`` or empty, no logging is performed.  We defer file
-        # opening to the moment of logging to avoid holding an open
-        # handle.
-
-    def _log_message(self, ts: float, src: str, dest: str, info: bytes, path: List[str]) -> None:
-        """Append a textual representation of a packet to the log file.
-
-        This helper writes a single line to the configured log file
-        containing the timestamp, source, destination (destination
-        callsign and digipeater path) and decoded information field.  The
-        timestamp is formatted as ``YYYY‑MM‑DD HH:MM:SS`` in the local
-        timezone.  Each callsign (destination and digipeaters) is
-        separated by three spaces to improve readability.  If logging
-        is disabled (``cfg.log_file`` is falsy) this function silently
-        returns.
-
-        :param ts: Unix timestamp of when the packet was handled.
-        :param src: Source callsign.
-        :param dest: Destination callsign (for APRS this is often the
-            TOCALL).
-        :param info: Raw information field of the AX.25 frame.
-        :param path: List of digipeater callsigns.
-        """
-        log_path = getattr(self.cfg, 'log_file', None)
-        if not log_path:
-            return
-        try:
-            timestr = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-            # Decode the information field to a string
-            try:
-                text = info.decode('latin1')
-            except Exception:
-                text = str(info)
-            # Build destination/path string.  Pad each callsign to a fixed
-            # width (nine characters) and separate columns with three
-            # spaces.  This yields a table‑like appearance in the log.
-            dest_columns: List[str] = []
-            if dest:
-                dest_columns.append(dest)
-            dest_columns.extend(path)
-            padded = [c.ljust(9) for c in dest_columns]
-            dest_display = '   '.join(padded).rstrip()
-            # Determine whether to include the '>' character.  If a
-            # destination callsign is present, prefix with '>'; otherwise
-            # omit it (beacon/unaddressed packet).
-            if dest:
-                line = f"{timestr} {src}> {dest_display}: {text}\n"
-            else:
-                # If no dest but there is a path, still include the path
-                if dest_display:
-                    line = f"{timestr} {src} {dest_display}: {text}\n"
-                else:
-                    line = f"{timestr} {src}: {text}\n"
-            with open(log_path, 'a', encoding='utf-8') as f:
-                f.write(line)
-        except Exception:
-            # Ignore any logging errors so as not to disturb UI operation
-            pass
-
-    def _add_message(self, ts: float, src: str, dest: str, info: bytes, path: List[str]) -> None:
-        """Record a packet in the UI message list and optionally log it.
-
-        All calls to append received or transmitted packets should go
-        through this helper so that the packet is both displayed and
-        recorded in the log file.  The packet tuple is appended to
-        ``self.messages``, and then `_log_message` is invoked with the
-        same parameters.
-
-        :param ts: Timestamp when the packet was handled.
-        :param src: Source callsign.
-        :param dest: Destination callsign to display (for TX this
-            should usually be the configured TOCALL rather than the
-            addressee).
-        :param info: Raw information (payload) bytes.
-        :param path: List of digipeater callsigns.
-        """
-        self.messages.append((ts, src, dest, info, path))
-        self._log_message(ts, src, dest, info, path)
-
     def run(self) -> None:
         """Main UI loop."""
         while True:
@@ -842,13 +736,10 @@ class APRSTUI:
             # Repeat the last raw APRS payload
             elif c == ord('t'):
                 self.repeat_last_raw()
-            # Quick message shortcuts: send the preconfigured quick
-            # replies (quick_msg1 and quick_msg2).  These commands
-            # allow rapid replies without manual typing.  The
+            # Quick message shortcuts: send QSL? 73 or QSL! 73.  These
+            # commands allow rapid replies without manual typing.  The
             # destination is taken from the currently selected callsign
-            # if one is selected; otherwise the user is prompted.  The
-            # text of the message itself is defined in the
-            # configuration file or defaults to QSL phrases.
+            # if one is selected; otherwise the user is prompted.
             elif c == ord('1'):
                 self._send_quick_message(self.cfg.quick_msg1)
             elif c == ord('2'):
@@ -890,6 +781,30 @@ class APRSTUI:
             # small sleep to reduce CPU
             time.sleep(0.05)
 
+    def _log_message(self, ts: float, src: str, dest: str, info: bytes, path: list) -> None:
+        """Append a single-line log entry to cfg.log_file, if set."""
+        if not getattr(self.cfg, 'log_file', ''):
+            return
+        try:
+            timestr = time.strftime('%H:%M:%S', time.localtime(ts))
+            try:
+                text = info.decode('latin1') if isinstance(info, (bytes, bytearray)) else str(info)
+            except Exception:
+                text = str(info)
+            # Build a compact header: SRC> DEST PATH: text
+            parts = []
+            if dest:
+                parts.append(dest)
+            if path:
+                parts.extend(path)
+            header = f"{src}> {' '.join(parts)}" if parts else f"{src}>"
+            line = f"{timestr} {header}: {text}\n"
+            with open(self.cfg.log_file, 'a', encoding='utf-8') as lf:
+                lf.write(line)
+        except Exception:
+            # Logging failures should never crash the UI
+            pass
+
     # UI helper to draw the interface
     def _draw(self) -> None:
         self.stdscr.erase()
@@ -905,19 +820,9 @@ class APRSTUI:
         self.stdscr.addstr(0, 0, status[:width - 1])
         # Commands line.  Include commands for clearing messages and the heard list,
         # toggling acknowledgements, and resending the last message.
-        # Build the command bar dynamically so that the quick message
-        # shortcuts reflect the configured phrases.  The quick
-        # messages may be arbitrarily long, so truncate them to five
-        # characters (plus an ellipsis) to conserve horizontal space on
-        # narrow terminals.  The original full text will still be sent
-        # when the corresponding key is pressed.
-        def _truncate(s: str, maxlen: int = 5) -> str:
-            return s if len(s) <= maxlen else (s[:maxlen] + '…')
-        qm1 = _truncate(self.cfg.quick_msg1)
-        qm2 = _truncate(self.cfg.quick_msg2)
         cmd_line = (
-            f"m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  "
-            f"d:raw  t:rep raw  r:repeat  1:{qm1}  2:{qm2}  a:ack on/off  q:quit"
+            "m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  "
+            "d:raw  t:rep raw  r:repeat  1:QSL?  2:QSL!  a:ack on/off  q:quit"
         )
         # Highlight the command bar to distinguish available keys.  Use
         # reverse video for visibility; if reverse video is not available
@@ -933,7 +838,8 @@ class APRSTUI:
         # Draw messages box
         self.stdscr.addstr(2, 0, "Received packets:", curses.A_BOLD)
         # Show last messages
-        displayed = self.messages[-msgs_height:]
+        packets_fit = max(1, msgs_height // 3)
+        displayed = self.messages[-packets_fit:]
         for i, msg in enumerate(displayed):
             ts, src, dest, info, path = msg
             timestr = time.strftime("%H:%M:%S", time.localtime(ts))
@@ -942,55 +848,47 @@ class APRSTUI:
                 text = info.decode('latin1')
             except Exception:
                 text = str(info)
-            # Construct a padded source string so that the '>' symbol is
-            # aligned across all lines.  The callsign base is padded to
-            # six characters.  The suffix (hyphen and SSID) is padded to
-            # four characters so that call signs with shorter or
-            # absent SSIDs still reserve the same width.  This yields
-            # a constant sender field width of ten characters.
-            base_part = src.split('-')[0] if '-' in src else src
-            ssid_part = src.split('-')[1] if '-' in src else ''
-            base_padded = base_part.ljust(6)
-            suffix = f"-{ssid_part}" if ssid_part else ''
+            
+# Build path string if present
+            path_str = ''
+            if path:
+                path_str = ' ' + ' '.join(path)
+            # Two-line layout
+            base = src.split('-')[0] if '-' in src else src
+            ssid = src.split('-')[1] if '-' in src else ''
+            base_padded = base.ljust(6)
+            suffix = f'-{ssid}' if ssid else ''
             suffix_padded = suffix.ljust(4)
             src_display = base_padded + suffix_padded
-
-            # Build destination/path display.  Separate the destination
-            # and each digipeater with three spaces for readability.
-            dest_cols: List[str] = []
+            # Destination + digis (space separated)
+            dest_cols = []
             if dest:
                 dest_cols.append(dest)
-            dest_cols.extend(path)
+            if path:
+                dest_cols.extend(path)
             dest_display = ' '.join(dest_cols)
-
-            # Assemble the line.  When a destination is present include
-            # the '>' symbol; otherwise omit it (beacons and raw
-            # packets).  If no destination or path is present, the
-            # message is considered to be from the sender only.            # Assemble the line. Always include '>' after the padded source,
-            # even if there is no destination/path (beacon without path).
-            src_part = f"{timestr} {src_display}> "
-            line = f"{src_part}{dest_display}: {text}" if dest_display else f"{src_part}: {text}"
-            # Truncate line to available width
-            truncated = line[: msgs_width - 1]
-            # Highlight our callsign if present
+            header = f"{timestr} {src_display}> {dest_display}".rstrip()
+            header_tr = header[: msgs_width - 1]
+            indent = len(timestr) + 1 + len(src_display) + 2
+            body = ' ' * indent + f": {text}"
+            body_tr = body[: msgs_width - 1]
+            # Row base for this packet (3 rows per packet: header, body, blank)
+            row_pos = 3 + i * 3
+            # Highlight our callsign on header
             cs = self.cfg.callsign.upper()
-            idx = truncated.upper().find(cs) if cs else -1
-            row_pos = 3 + i
+            idx = header_tr.upper().find(cs) if cs else -1
             if idx >= 0:
-                # Write text before the callsign
                 if idx > 0:
-                    self.stdscr.addstr(row_pos, 0, truncated[:idx])
-                # Write the callsign highlighted
-                cs_end = idx + len(cs)
-                if cs_end > len(truncated):
-                    cs_end = len(truncated)
-                highlight_text = truncated[idx:cs_end]
-                self.stdscr.addstr(row_pos, idx, highlight_text, self._highlight_attr)
-                # Write the remainder
-                if cs_end < len(truncated):
-                    self.stdscr.addstr(row_pos, cs_end, truncated[cs_end:])
+                    self.stdscr.addstr(row_pos, 0, header_tr[:idx])
+                cs_end = min(idx + len(cs), len(header_tr))
+                self.stdscr.addstr(row_pos, idx, header_tr[idx:cs_end], self._highlight_attr)
+                if cs_end < len(header_tr):
+                    self.stdscr.addstr(row_pos, cs_end, header_tr[cs_end:])
             else:
-                self.stdscr.addstr(row_pos, 0, truncated)
+                self.stdscr.addstr(row_pos, 0, header_tr)
+            # Body and blank separator
+            self.stdscr.addstr(row_pos + 1, 0, body_tr)
+            # row_pos + 2 left intentionally blank
         # Draw heard stations.  Reserve the bottom line for prompts by limiting
         # the height of the list to match the messages area.  Without this
         # constraint the heard list would overwrite the prompt line when the
@@ -1000,7 +898,7 @@ class APRSTUI:
         # ordering for display and mouse selection.  Store it on
         # self.current_heard_list so the mouse handler can map row
         # indices to callsigns reliably.
-        heard_list = sorted(self.heard)
+        heard_list = sorted(self.heard, key=lambda c: self.heard_times.get(c, 0), reverse=True)
         self.current_heard_list = heard_list
         # Use the same height as the messages area (height - 4) to avoid
         # drawing into the last line of the terminal reserved for user input.
@@ -1033,8 +931,12 @@ class APRSTUI:
     def _process_incoming(self) -> None:
         while not self.msg_queue.empty():
             dest, src, path, info, ts = self.msg_queue.get()
-            # Add to heard list
+            # Add/update heard list
             self.heard.add(src)
+            try:
+                self.heard_times[src] = float(ts)
+            except Exception:
+                self.heard_times[src] = time.time()
             # Recognise acknowledgements: info starts with ':' and contains ack
             if info and info.startswith(b':'):
                 try:
@@ -1044,10 +946,12 @@ class APRSTUI:
                 # Format ::CALLSIGN:ackNNN
                 if len(payload) >= 13 and payload[10:13] == 'ack':
                     # ack for our message ID; just display
-                    self._add_message(ts, src, dest, info, path)
+                    self.messages.append((ts, src, dest, info, path))
                     continue
+                    self._log_message(ts, src, dest, info, path)
             # Save message; display the path exactly as provided by the TNC
-            self._add_message(ts, src, dest, info, path)
+            self.messages.append((ts, src, dest, info, path))
+            self._log_message(ts, src, dest, info, path)
 
     # Prompt user for a string input
     def _prompt(self, prompt: str, default: str = '') -> Optional[str]:
@@ -1130,20 +1034,19 @@ class APRSTUI:
         self.stdscr.nodelay(False)
         self.stdscr.timeout(-1)
         try:
-            # Determine the destination callsign.  When a callsign has been
-            # selected in the heard list via mouse click, use it directly
-            # as the destination without prompting.  Otherwise prompt the
-            # user and allow cancellation with ESC.  If the user presses
-            # Enter without typing anything and no default is set, cancel
-            # the operation.
-            if self.selected_heard:
-                dest = self.selected_heard.strip().upper()
-            else:
-                default_dest = ''
-                dest = self._prompt_cancelable("To station: ", default_dest)
-                if dest is None or dest == '':
-                    return
-                dest = dest.strip().upper()
+            # Get destination callsign; allow cancellation with ESC.  If a
+            # callsign has been selected via mouse, use it as the default
+            # value so that pressing Enter accepts it.  Otherwise the
+            # default is empty and the user must type a destination.
+            default_dest = self.selected_heard or ''
+            dest = self._prompt_cancelable("To station: ", default_dest)
+            # None indicates cancellation.  If the user presses Enter
+            # without entering anything and no default is set, dest will be
+            # an empty string; treat this as a cancellation as well.
+            if dest is None or dest == '':
+                return
+            # Convert destination to upper case for consistency
+            dest = dest.strip().upper()
             # Get message body; allow cancellation with ESC
             text = self._prompt_cancelable("Message: ")
             if text is None:
@@ -1166,13 +1069,10 @@ class APRSTUI:
             # Mark our path so that the last digipeater is displayed with '*'
             # Display the configured path as is without marking the last hop.
             path_disp = list(self.cfg.path)
-            # When displaying our own transmissions, show the configured
-            # TOCALL (software identifier) as the destination rather than
-            # the message addressee.  The addressee is encoded in the
-            # payload and will appear in the text portion of the UI.
-            self._add_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
-            # Store last message for possible retransmission.  msg_id may be
-            # None when acknowledgements are disabled.
+            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+            self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
+            # Store last message for possible retransmission.  msg_id may be None
+            # when acknowledgements are disabled.
             self.last_message = (dest, text, msg_id)
         finally:
             # Restore non‑blocking mode
@@ -1195,12 +1095,11 @@ class APRSTUI:
         )
         self.tnc.send_frame(ax25)
         ts = time.time()
-        # Mark path for display.  Use the configured path as is without
-        # marking the last hop.  For position beacons the destination
-        # callsign is intentionally left blank to indicate an unaddressed
-        # packet; therefore ``dest`` is the empty string.
+        # Mark path for display
+        # Display the configured path as is without marking the last hop
         path_disp = list(self.cfg.path)
-        self._add_message(ts, self.cfg.callsign, '', payload, path_disp)
+        self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+        self._log_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
 
     # Edit configuration interactively
     def _edit_config(self) -> None:
@@ -1356,11 +1255,11 @@ class APRSTUI:
         )
         self.tnc.send_frame(ax25)
         ts = time.time()
-        # Log retransmitted message in the UI.  Display the configured
-        # TOCALL rather than the addressee so that the header matches
-        # the received format.  Use the configured path as is for display.
+        # Log retransmitted message in the UI
+        # Use the configured path as is for display
         path_disp = list(self.cfg.path)
-        self._add_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
+        self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+        self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
 
     def compose_raw_data(self) -> None:
         """Prompt the user to enter a raw APRS payload and transmit it.
@@ -1396,7 +1295,8 @@ class APRSTUI:
             # clarifies which software identifier was used.
             # Display the configured path as is
             path_disp = list(self.cfg.path)
-            self._add_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
+            self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+            self._log_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
             # Remember this raw payload for potential retransmission
             self.last_raw = text
         finally:
@@ -1427,7 +1327,8 @@ class APRSTUI:
         # Display the TOCALL as the destination in the UI for raw repeats
         # Display the configured path as is
         path_disp = list(self.cfg.path)
-        self._add_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
+        self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+        self._log_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
 
     def _send_quick_message(self, quick_text: str) -> None:
         """Send a predefined APRS message quickly.
@@ -1463,12 +1364,8 @@ class APRSTUI:
             self.tnc.send_frame(ax25)
             ts = time.time()
             path_disp = list(self.cfg.path)
-            # For display, use the configured TOCALL rather than the
-            # addressee.  The addressee is encoded in the payload and
-            # will appear in the text portion of the UI.  Log the
-            # message via _add_message to ensure it is written to the
-            # configured log file.
-            self._add_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
+            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+            self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
             # Update last_message record for potential repeat
             self.last_message = (dest, quick_text, msg_id)
         finally:
@@ -1480,9 +1377,7 @@ def main(stdscr: curses.window) -> None:
     # Try to load previously saved configuration
     saved = load_saved_config()
     if saved:
-        # Populate StationConfig from saved data.  Include optional
-        # quick message and log file settings if present; fall back
-        # to built‑in defaults otherwise.
+        # Populate StationConfig from saved data
         cfg = StationConfig(
             callsign=saved.get('callsign', ''),
             tocall=saved.get('tocall', 'APZ001'),
@@ -1496,7 +1391,7 @@ def main(stdscr: curses.window) -> None:
             pos_comment=saved.get('pos_comment', ''),
             quick_msg1=saved.get('quick_msg1', 'QSL? 73'),
             quick_msg2=saved.get('quick_msg2', 'QSL! 73'),
-            log_file=saved.get('log_file', 'aprs_tui.log') if saved.get('log_file', 'aprs_tui.log') else None,
+            log_file=saved.get('log_file', 'aprs_tui.log'),
         )
     else:
         # Interactive setup if no saved configuration

@@ -88,7 +88,7 @@ Connection parameters (host/port) default to `localhost:8001` and can be edited 
 - `q` — quit
 
 **Mouse:** click a callsign in **Heard** to select it as default destination for `m`, `1`, or `2`.
-
+**Note:** if you press `m` with an highlighted callsign the software will still ask for the destination, just press enter and it'll be the callsign you selected in the heard list.
 ---
 
 ## How it works (short technical tour)

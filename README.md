@@ -1,149 +1,138 @@
-# PyttiAPRS — Terminal APRS Client (TUI)
+# PyttiAPRS — APRS TUI over KISS (Direwolf‑compatible)
 
-PyttiAPRS is a **curses-based** terminal client that lets you send/receive APRS UI frames via a **KISS** TNC (e.g., Direwolf), transmit **position beacons**, and inspect the **AX.25 header/path** in a compact, keyboard‑driven UI.
+A single‑file, dependency‑free terminal UI to make APRS AX.25 contacts through any KISS‑compatible TNC (e.g. Direwolf over TCP). It can compose APRS **messages**, send **position beacons**, and show a live log with a **heard stations** side panel.
 
-> This README reflects the latest changes as of **2025‑08‑08** and supersedes prior docs. It aligns with the updated code and UI behavior.
-
----
-
-## Highlights
-
-- **KISS over TCP** (e.g., Direwolf on `localhost:8001`).
-- **APRS messages & position beacons** (uncompressed format).
-- **Header viewer**: see `SRC > DEST DIGI…` path for each frame.
-- **Heard panel**: unique stations heard since startup.
-- **No external APRS libs required** — self‑contained AX.25/KISS helpers.
+> Script filename in this repo: `aprs_tui.py`
 
 ---
 
-## What’s new (2025‑08‑08)
+## Highlights (new & improved)
 
-- **Configurable quick replies**: keys **1** and **2** read phrases from JSON (`quick_msg1`, `quick_msg2`). The **command bar** shows the actual configured texts.
-- **RX/TX header parity**: for our **TX** packets the field _after_ `>` now shows your configured **TOCALL** (as RX already does). The APRS **ADDRESSEE** stays in the payload (`::ADDRESSEE:…`).
-- **Source‑side `>` alignment**: the **source** callsign field is padded so that the `>` character is vertically aligned across lines. No extra padding is applied to destination or digipeaters; they are just separated by a single space.
-- **File logging**: every RX/TX packet is appended to `log_file` (configurable) with timestamp, header, and payload.
-- **Command bar** improvements: dynamically reflects configured quick replies.
-- **Mouse quick‑select** (documented): click a callsign in **Heard** to make it the default destination for messages and quick replies.
+- **Self‑contained KISS I/O**  
+  Native KISS framing/unframing (FEND/FESC escaping) and AX.25 UI frame encode/decode. No external packages needed.
 
-Example (monospace alignment in terminal):
-```
-17:21:37 IU1BOT    > JN44QH IR1ZXE-11* WIDE2-1: …
-17:23:18 IR1ZXE-11 > APMI04 WIDE1-1: …
-17:25:56 IN3DNS-13 > T5SWU4 IR1ZXE-11* WIDE1* WIDE2-1: …
-```
+- **APRS Message flow (with optional ACK IDs)**  
+  Proper 9‑char addressee padding, optional automatic `{`NNN message IDs for ACKs, and recognition of received `ackNNN`.
+
+- **Uncompressed APRS Position beacons**  
+  Build `!` position payloads with configurable symbol **table** (`/` or `\`) and **code** (e.g. `>`), plus an optional default comment.
+
+- **TUI built with `curses`**  
+  Clean two‑pane layout: scrolling packet log on the left, **Heard** list on the right. **Mouse support** lets you click a callsign to target it quickly.
+
+- **Quick‑reply shortcuts**  
+  `1` sends `QSL? 73`, `2` sends `QSL! 73` to the selected (or prompted) station.
+
+- **Resend controls**  
+  `r` repeats the **last message**, `t` repeats the **last raw payload**.
+
+- **ACK toggle for satellites**  
+  Press `a` to enable/disable including message IDs (useful when ACKs aren’t supported on a pass).
+
+- **Writable config & session persistence**  
+  On exit, settings are saved to the first writable path among:
+  - repo dir: `./aprs_tui_config.json`
+  - home: `~/.aprs_tui_config.json`
+  - cwd: `./aprs_tui_config.json`
+
+  Persisted fields include: callsign, tocall, path, lat/lon, symbol table/code, host/port, default position comment, quick‑messages, and log file.
+
+- **File logging**  
+  Appends compact single‑line entries to `aprs_tui.log` (configurable).
 
 ---
 
 ## Requirements
 
-- **Python 3.7+**
-- A **KISS‑capable TNC** reachable over TCP (e.g., Direwolf)
-- **Windows only**: `pip install windows-curses`
+- Python 3.7+  
+- A KISS‑compatible TNC reachable via **TCP** (Direwolf recommended)  
+- A terminal of at least **80×24**
+
+No third‑party Python dependencies.
 
 ---
 
-## Install & Run
+## Quick start
+
+1. Start your TNC (e.g. Direwolf) with KISS TCP enabled (default shown in examples is port **8001**).
+2. Run:
 
 ```bash
-git clone https://github.com/vash909/PyttiAPRS.git
-cd PyttiAPRS
-python3 PyttiAPRS.py
+python3 aprs_tui.py
 ```
 
-If connection fails, confirm your TNC is running and the KISS TCP port/host are correct.
+3. On first run, you’ll be prompted for:
+   - **Callsign** (e.g. `IU1BOT-9`)
+   - **TOCALL** (software ID, default `APZ001`)
+   - **Digipeater path** (comma/space‑separated, e.g. `ARISS`, `WIDE1-1 WIDE2-1`, or leave blank)
+   - **Latitude/Longitude** and **N/S**, **E/W**
+   - **Symbol table** (`/` or `\`) and **symbol code** (single char)
+   - Optional default **position comment**
+
+Connection parameters (host/port) default to `localhost:8001` and can be edited later.
 
 ---
 
-## First‑run Setup
+## Key bindings
 
-On first launch you’ll be prompted for:
+- `m` — compose & send APRS **message** (ID auto‑appended when ACK is ON)  
+- `p` — send **position beacon** using stored position/comment  
+- `c` — edit station **config** (call, tocall, path, lat/lon, symbol, comment, etc.)  
+- `d` — send **raw APRS payload** (no addressee/ID)  
+- `t` — **repeat last raw** payload  
+- `r` — **repeat last message** (keeps same dest and, if ACK is ON, same ID)  
+- `1` / `2` — quick messages: `QSL? 73` / `QSL! 73`  
+- `x` — clear message log in the UI  
+- `h` — clear **Heard** list  
+- `a` — toggle **ACK** on/off  
+- `q` — quit
 
-- **Callsign & SSID** (e.g., `IK2ABC-7`)
-- **TOCALL** (software identifier, up to 6 chars; default `APZ001`. For satellites you may prefer a WW Locator per your workflow)
-- **Digipeater path** (comma/space separated, e.g., `RS0ISS WIDE2-1` — **hyphens stay inside SSIDs** like `WIDE2-1`)
-- **Latitude / Longitude** and hemispheres (N/S, E/W)
-- **Symbol table** (`/` or `\`) and **symbol code** (single char), plus **default beacon comment**
-- **KISS host/port** (default `localhost:8001`)
-
-These values are saved to a JSON file (see **Configuration & persistence**).
-
----
-
-## UI Overview
-
-- **Header**: your callsign, TOCALL, PATH, lat/lon, symbol, and **ACK ON/OFF**.
-- **Messages** (left): timestamped list of RX/TX packets with `SRC > DEST DIGI…: text`. Your callsign is highlighted.
-- **Heard** (right): unique stations heard. Click to set as default destination.
-
-**Escape** cancels any input prompt and returns to the main view.
+**Mouse:** click a callsign in **Heard** to select it as default destination for `m`, `1`, or `2`.
 
 ---
 
-## Keyboard Reference
+## How it works (short technical tour)
 
-- `m` — compose and send a **message** (prompts for addressee and text; uses selected **Heard** station as default)
-- `p` — send **position beacon** (uncompressed; uses configured comment)
-- `c` — **configure** station (callsign, tocall, path, position, symbol, host/port, comment)
-- `x` — **clear** messages panel
-- `h` — **clear** Heard list
-- `d` — send **raw APRS** payload (no padded addressee, no ID; TOCALL is still the AX.25 dest)
-- `t` — **repeat last raw**
-- `r` — **repeat last message** (reuses ID when ACK is enabled)
-- `1` — send **`quick_msg1`** from JSON (text shown in the command bar)
-- `2` — send **`quick_msg2`** from JSON (text shown in the command bar)
-- `a` — toggle **ACK** on/off (controls appending a `{ID}` to outgoing messages)
-- `q` — **quit** (saves config, closes TNC)
+- **AX.25 UI frames**  
+  Addresses are encoded to 7‑byte fields (6 shifted ASCII chars + SSID byte with bits 5–6 set). The last address sets bit 0. Only **UI** frames (control `0x03`, PID `0xF0`) are parsed.
 
----
+- **KISS**  
+  Frames are wrapped with `FEND (0xC0)`; embedded `FEND`/`FESC` are escaped to `FESC TFEND`/`FESC TFESC`. Only KISS **data** frames (`0x00`) are processed.
 
-## Display & Headers
+- **APRS payloads**  
+  - Messages: `:{addressee(9)}:{text}{{ID}` (ID optional)  
+  - Positions: `!DDMM.mmN/S{table}DDDMM.mmE/W{symbol}{comment}`
 
-- **TX header**: after `>`, the UI shows your **TOCALL** (software identifier). The APRS **ADDRESSEE** of a message is encoded **in the payload** (`::ADDRESSEE:…`) and not repeated in the header.
-- **`>` alignment**: only the **source** field is padded, so the `>` column lines up. **Destination and digipeaters** are rendered without fixed‑width padding — just **single spaces** in between.
-- **Digipeater `*`**: a digipeater that actually repeated the packet is shown with `*` (derived from the AX.25 H bit).
+- **Encoding choices**  
+  Payloads are encoded as **Latin‑1** when sending/logging to preserve arbitrary bytes.
+
+- **Logging**  
+  Lines look like: `HH:MM:SS SRC> DEST PATH...: text`
 
 ---
 
-## Configuration & Persistence
+## Configuration & files
 
-PyttiAPRS reads/writes a JSON config file named **`aprs_tui_config.json`**. It searches these locations (first writable wins):
-
-1. Script directory
-2. User home as `.aprs_tui_config.json`
-3. Current working directory
-
-### Keys
-
-- `callsign`: string (e.g., `"IK2ABC-7"`)
-- `tocall`: string (max 6, e.g., `"APZ001"`)
-- `path`: list of strings (e.g., `["RS0ISS","WIDE2-1"]`)
-- `latitude`: float; `longitude`: float
-- `symbol_table`: `"/"` or `"\\"`
-- `symbol_code`: single character (e.g., `">"`)
-- `host`: string (default `"localhost"`)
-- `port`: int (default `8001`)
-- `pos_comment`: string
-- `quick_msg1`: string (default `"QSL? 73"`)
-- `quick_msg2`: string (default `"QSL! 73"`)
-- `log_file`: string (default `"aprs_tui.log"`)
+- **Saved config**: `aprs_tui_config.json` in the first writable location (see above).  
+- **Log**: `aprs_tui.log` (path/name configurable in the app).  
+- **Not persisted**: The sequential message ID counter (resets each run).
 
 ---
 
-## Technical Notes
+## Compatibility & scope
 
-- **APRS messages** use the format `::ADDRESSEE:TEXT{ID}` (ADDRESSEE padded to 9 chars; `{ID}` optional and used for ACKs).
-- **Position beacons** are sent in **uncompressed** format with your configured table/code and comment.
-- **AX.25/KISS**: the app builds AX.25 UI frames (dest, source, digis, control `0x03`, PID `0xF0`) and KISS‑encodes them (FEND/FESC escaping) before sending to the TNC.
+- Tested with software TNCs using the standard KISS TCP interface (e.g. Direwolf).  
+- Only **unconnected UI** frames are decoded. Connected‑mode frames are ignored.  
+- Message ACKs are recognized; automatic retry of un‑ACKed messages is **not** implemented.
 
 ---
 
-## Logging
+## Tips
 
-When `log_file` is set (default `aprs_tui.log`), each packet is appended with local time, aligned header, and payload. Example format:
-
-```
-HH:MM:SS SRC> DEST DIGI1 DIGI2: payload
-```
+- For **satellite APRS**, consider toggling **ACK OFF** (`a`) so messages don’t carry IDs.  
+- Use the **Heard** list + mouse to target quick replies without retyping callsigns.  
+- Keep the terminal at least **80×24** for the best layout.
+- Remember to press `q` instead of closing your terminal window to save changes and log.
 
 ---
 
@@ -165,7 +154,21 @@ PRs are welcome. Please:
 
 ---
 
-## License
+## License & author
 
-Apache‑2.0. See `LICENSE` for details.
+- **Apache 2.0**  
+- Author: Lorenzo Gianlorenzi (IU1BOT) — iu1bot@xzgroup.net
 
+---
+
+## Changelog (recent)
+
+- TUI layout refinements; highlighted command bar and status line  
+- **Mouse selection** in Heard list + default destination behavior  
+- **Quick messages** (`1`/`2`) and **ACK toggle** (`a`)  
+- **Repeat last message/raw** (`r`/`t`)  
+- **Raw data** send mode (`d`)  
+- **Config persistence** with multiple candidate paths  
+- **File logging** with robust error handling
+
+*Updated: 2025-08-11*

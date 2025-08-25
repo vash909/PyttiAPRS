@@ -169,6 +169,9 @@ def save_config(cfg: 'StationConfig') -> None:
         'quick_msg1': cfg.quick_msg1,
         'quick_msg2': cfg.quick_msg2,
         'log_file': cfg.log_file,
+        # Persist the acknowledgement flag so that the user's preference is
+        # retained across sessions.  When absent, the default remains True.
+        'ack_enabled': cfg.ack_enabled,
     }
     path = get_writable_config_path()
     if path is None:
@@ -613,6 +616,11 @@ class StationConfig:
     quick_msg1: str = 'QSL? 73'
     quick_msg2: str = 'QSL! 73'
     log_file: str = 'aprs_tui.log'
+    # Whether acknowledgements are appended to outgoing messages by default.
+    # When set to False, the application will omit the message ID when
+    # composing messages.  The value may be toggled at runtime via the
+    # 'a' command and is persisted in the configuration file.
+    ack_enabled: bool = True
 
     def next_msg_id(self) -> int:
         mid = self.msg_id_counter
@@ -651,8 +659,9 @@ class APRSTUI:
 
         # Track whether acknowledgements (message IDs) are appended to outgoing
         # messages.  APRS over satellites may not support ACKs, so this can
-        # be toggled at runtime via the 'a' key.  Default is True (ACKs on).
-        self.ack_enabled: bool = True
+        # be toggled at runtime via the 'a' key.  Initialise from the
+        # configuration so that the setting persists across sessions.
+        self.ack_enabled: bool = getattr(cfg, 'ack_enabled', True)
         # Remember the most recently sent message so that it can be
         # retransmitted (for example if a digipeater did not repeat it).
         # Stored as a tuple (destination, text, msg_id).  msg_id may be None
@@ -820,9 +829,15 @@ class APRSTUI:
         self.stdscr.addstr(0, 0, status[:width - 1])
         # Commands line.  Include commands for clearing messages and the heard list,
         # toggling acknowledgements, and resending the last message.
+        # Build the command bar dynamically so that the quick message labels
+        # reflect the user‑configured phrases for keys '1' and '2'.  When
+        # quick_msg1 or quick_msg2 contain long strings, the command bar
+        # will be truncated to fit within the terminal width.
         cmd_line = (
-            "m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  "
-            "d:raw  t:rep raw  r:repeat  1:QSL?  2:QSL!  a:ack on/off  q:quit"
+            f"m:msg  p:pos  c:cfg  x:clr msgs  h:clr heard  "
+            f"d:raw  t:rep raw  r:repeat  "
+            f"1:{self.cfg.quick_msg1}  2:{self.cfg.quick_msg2}  "
+            f"a:ack on/off  q:quit"
         )
         # Highlight the command bar to distinguish available keys.  Use
         # reverse video for visibility; if reverse video is not available
@@ -887,7 +902,28 @@ class APRSTUI:
             else:
                 self.stdscr.addstr(row_pos, 0, header_tr)
             # Body and blank separator
-            self.stdscr.addstr(row_pos + 1, 0, body_tr)
+            # Highlight our callsign if it appears anywhere in the body.  This
+            # allows quick identification of replies addressed to us.  Search
+            # case‑insensitively and only highlight the first occurrence to
+            # simplify rendering.
+            cs = self.cfg.callsign.upper() if self.cfg.callsign else ''
+            if cs:
+                body_upper = body_tr.upper()
+                idx_body = body_upper.find(cs)
+            else:
+                idx_body = -1
+            if idx_body >= 0:
+                # Print portion before our callsign
+                if idx_body > 0:
+                    self.stdscr.addstr(row_pos + 1, 0, body_tr[:idx_body])
+                # Highlight the callsign
+                cs_end = min(idx_body + len(cs), len(body_tr))
+                self.stdscr.addstr(row_pos + 1, idx_body, body_tr[idx_body:cs_end], self._highlight_attr)
+                # Print remainder after the callsign, if any
+                if cs_end < len(body_tr):
+                    self.stdscr.addstr(row_pos + 1, cs_end, body_tr[cs_end:])
+            else:
+                self.stdscr.addstr(row_pos + 1, 0, body_tr)
             # row_pos + 2 left intentionally blank
         # Draw heard stations.  Reserve the bottom line for prompts by limiting
         # the height of the list to match the messages area.  Without this
@@ -956,11 +992,20 @@ class APRSTUI:
     # Prompt user for a string input
     def _prompt(self, prompt: str, default: str = '') -> Optional[str]:
         curses.echo()
-        self.stdscr.addstr(curses.LINES - 1, 0, ' ' * (curses.COLS - 1))
-        self.stdscr.addstr(curses.LINES - 1, 0, prompt)
+        # Determine the bottom line and available width dynamically to
+        # ensure prompts always appear at the very bottom of the screen
+        # regardless of terminal resize.  curses.LINES and curses.COLS are
+        # static values captured at program start, so use getmaxyx() on
+        # the current window for up-to-date dimensions.
+        height, width = self.stdscr.getmaxyx()
+        bottom_y = height - 1
+        # Clear the entire bottom line before writing the prompt
+        self.stdscr.addstr(bottom_y, 0, ' ' * (width - 1))
+        self.stdscr.addstr(bottom_y, 0, prompt)
         self.stdscr.refresh()
         try:
-            input_str = self.stdscr.getstr(curses.LINES - 1, len(prompt), 60)
+            # Read input starting after the prompt; limit maximum length to 60
+            input_str = self.stdscr.getstr(bottom_y, len(prompt), 60)
             if not input_str and default:
                 return default
             return input_str.decode('utf-8')
@@ -984,9 +1029,15 @@ class APRSTUI:
         # Ensure we are in blocking mode during interactive input; the caller
         # should have already set nodelay(False).
         curses.echo()
-        # Clear bottom line and write prompt
-        bottom_y = curses.LINES - 1
-        self.stdscr.addstr(bottom_y, 0, ' ' * (curses.COLS - 1))
+        # Clear bottom line and write prompt.  Compute the bottom row and
+        # width dynamically to handle terminal resizes.  Without this
+        # adjustment the prompt can appear mid‑screen when the message
+        # list wraps down to what curses.LINES believes is the last
+        # line.  Using getmaxyx() ensures we always target the true
+        # last line of the current screen.
+        height, width = self.stdscr.getmaxyx()
+        bottom_y = height - 1
+        self.stdscr.addstr(bottom_y, 0, ' ' * (width - 1))
         self.stdscr.addstr(bottom_y, 0, prompt)
         self.stdscr.refresh()
         # Build the input string character by character
@@ -1107,37 +1158,88 @@ class APRSTUI:
         self.stdscr.nodelay(False)
         self.stdscr.timeout(-1)
         try:
-            new_call = self._prompt(
+            # Use cancelable prompts for each field so that pressing ESC aborts
+            # the entire configuration edit.  Collect values locally and
+            # commit them only if all prompts succeed.
+            # Callsign
+            new_call = self._prompt_cancelable(
                 f"Callsign (current {self.cfg.callsign}): ", self.cfg.callsign
             )
-            if new_call:
-                # Always store callsign in uppercase
-                self.cfg.callsign = new_call.strip().upper()
-            new_tocall = self._prompt(
+            if new_call is None:
+                return
+            # TOCALL
+            new_tocall = self._prompt_cancelable(
                 f"Tocall (software id) (current {self.cfg.tocall}): ", self.cfg.tocall
             )
-            if new_tocall:
-                self.cfg.tocall = new_tocall.strip().upper()[:6]
-            path_str = self._prompt(
+            if new_tocall is None:
+                return
+            # Digipeater path
+            path_str = self._prompt_cancelable(
                 f"Digipeater path comma separated (current {'-'.join(self.cfg.path)}): ",
                 '-'.join(self.cfg.path)
             )
+            if path_str is None:
+                return
+            # Latitude magnitude and direction
+            lat_val_str = self._prompt_cancelable(
+                f"Latitude degrees (decimal) (current {abs(self.cfg.latitude)}): ",
+                str(abs(self.cfg.latitude))
+            )
+            if lat_val_str is None:
+                return
+            lat_dir = self._prompt_cancelable(
+                f"Latitude direction (N/S) (current {'N' if self.cfg.latitude >= 0 else 'S'}): ",
+                'N' if self.cfg.latitude >= 0 else 'S'
+            )
+            if lat_dir is None:
+                return
+            # Longitude magnitude and direction
+            lon_val_str = self._prompt_cancelable(
+                f"Longitude degrees (decimal) (current {abs(self.cfg.longitude)}): ",
+                str(abs(self.cfg.longitude))
+            )
+            if lon_val_str is None:
+                return
+            lon_dir = self._prompt_cancelable(
+                f"Longitude direction (E/W) (current {'E' if self.cfg.longitude >= 0 else 'W'}): ",
+                'E' if self.cfg.longitude >= 0 else 'W'
+            )
+            if lon_dir is None:
+                return
+            # Symbol table and code
+            sym_table = self._prompt_cancelable(
+                f"Symbol table (/ or \\) (current {self.cfg.symbol_table}): ",
+                self.cfg.symbol_table
+            )
+            if sym_table is None:
+                return
+            sym_code = self._prompt_cancelable(
+                f"Symbol code (current {self.cfg.symbol_code}): ", self.cfg.symbol_code
+            )
+            if sym_code is None:
+                return
+            # Default position comment
+            pos_comm = self._prompt_cancelable(
+                f"Default position comment (current {self.cfg.pos_comment}): ",
+                self.cfg.pos_comment
+            )
+            if pos_comm is None:
+                return
+            # All prompts succeeded: update configuration
+            # Callsign
+            if new_call:
+                self.cfg.callsign = new_call.strip().upper()
+            # TOCALL (limit to 6 chars and uppercase)
+            if new_tocall:
+                self.cfg.tocall = new_tocall.strip().upper()[:6]
+            # Path: split by comma or whitespace but keep hyphens within SSID
             if path_str is not None:
-                # Split by comma or whitespace but keep hyphens within SSID
                 self.cfg.path = [
                     p.strip().upper()
                     for p in path_str.replace(',', ' ').split()
                     if p.strip()
                 ]
-            # Latitude magnitude and direction
-            lat_val_str = self._prompt(
-                f"Latitude degrees (decimal) (current {abs(self.cfg.latitude)}): ",
-                str(abs(self.cfg.latitude))
-            )
-            lat_dir = self._prompt(
-                f"Latitude direction (N/S) (current {'N' if self.cfg.latitude >= 0 else 'S'}): ",
-                'N' if self.cfg.latitude >= 0 else 'S'
-            )
+            # Latitude
             try:
                 lat_val = float(lat_val_str)
             except Exception:
@@ -1146,15 +1248,7 @@ class APRSTUI:
             if lat_dir not in ['N', 'S']:
                 lat_dir = 'N'
             self.cfg.latitude = lat_val if lat_dir == 'N' else -lat_val
-            # Longitude magnitude and direction
-            lon_val_str = self._prompt(
-                f"Longitude degrees (decimal) (current {abs(self.cfg.longitude)}): ",
-                str(abs(self.cfg.longitude))
-            )
-            lon_dir = self._prompt(
-                f"Longitude direction (E/W) (current {'E' if self.cfg.longitude >= 0 else 'W'}): ",
-                'E' if self.cfg.longitude >= 0 else 'W'
-            )
+            # Longitude
             try:
                 lon_val = float(lon_val_str)
             except Exception:
@@ -1163,23 +1257,13 @@ class APRSTUI:
             if lon_dir not in ['E', 'W']:
                 lon_dir = 'E'
             self.cfg.longitude = lon_val if lon_dir == 'E' else -lon_val
-            # Symbol table (two choices) and code
-            sym_table = self._prompt(
-                f"Symbol table (/ or \\) (current {self.cfg.symbol_table}): ",
-                self.cfg.symbol_table
-            )
+            # Symbol table
             if sym_table in ['/', '\\']:
                 self.cfg.symbol_table = sym_table
-            sym_code = self._prompt(
-                f"Symbol code (current {self.cfg.symbol_code}): ", self.cfg.symbol_code
-            )
+            # Symbol code
             if sym_code:
                 self.cfg.symbol_code = sym_code[0]
-            # Default position comment
-            pos_comm = self._prompt(
-                f"Default position comment (current {self.cfg.pos_comment}): ",
-                self.cfg.pos_comment
-            )
+            # Default comment
             if pos_comm is not None:
                 self.cfg.pos_comment = pos_comm
         finally:
@@ -1231,7 +1315,13 @@ class APRSTUI:
         which can be desirable for satellite communications where ACKs
         are unsupported.  This method flips the state between ON and OFF.
         """
+        # Flip the acknowledgement flag and propagate the change back to the
+        # configuration so that it can be persisted when saving.  Without
+        # updating cfg.ack_enabled, the toggled state would be lost on the
+        # next run.
         self.ack_enabled = not self.ack_enabled
+        if hasattr(self.cfg, 'ack_enabled'):
+            self.cfg.ack_enabled = self.ack_enabled
 
     def repeat_last_message(self) -> None:
         """Retransmit the most recently sent message.
@@ -1392,6 +1482,7 @@ def main(stdscr: curses.window) -> None:
             quick_msg1=saved.get('quick_msg1', 'QSL? 73'),
             quick_msg2=saved.get('quick_msg2', 'QSL! 73'),
             log_file=saved.get('log_file', 'aprs_tui.log'),
+            ack_enabled=saved.get('ack_enabled', True),
         )
     else:
         # Interactive setup if no saved configuration

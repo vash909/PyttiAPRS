@@ -1,4 +1,5 @@
 # PyttiAPRS — APRS TUI over KISS (Direwolf‑compatible)
+> FOR USER GUIDE CHECK: `user_guide_en.md`
 
 A single‑file, dependency‑free terminal UI to make APRS AX.25 contacts through any KISS‑compatible TNC (e.g. Direwolf over TCP). It can compose APRS **messages**, send **position beacons**, and show a live log with a **heard stations** side panel.
 
@@ -73,24 +74,6 @@ Connection parameters (host/port) default to `localhost:8001` and can be edited 
 
 ---
 
-## Key bindings
-
-- `m` — compose & send APRS **message** (ID auto‑appended when ACK is ON)  
-- `p` — send **position beacon** using stored position/comment  
-- `c` — edit station **config** (call, tocall, path, lat/lon, symbol, comment, etc.)  
-- `d` — send **raw APRS payload** (no addressee/ID)  
-- `t` — **repeat last raw** payload  
-- `r` — **repeat last message** (keeps same dest and, if ACK is ON, same ID)  
-- `1` / `2` — quick messages: `QSL? 73` / `QSL! 73`  
-- `x` — clear message log in the UI  
-- `h` — clear **Heard** list  
-- `a` — toggle **ACK** on/off  
-- `q` — quit
-
-**Mouse:** click a callsign in **Heard** to select it as default destination for `m`, `1`, or `2`.
-**Note:** if you press `m` with an highlighted callsign the software will still ask for the destination, just press enter and it'll be the callsign you selected in the heard list.
----
-
 ## How it works (short technical tour)
 
 - **AX.25 UI frames**  
@@ -127,15 +110,6 @@ Connection parameters (host/port) default to `localhost:8001` and can be edited 
 
 ---
 
-## Tips
-
-- For **satellite APRS**, consider toggling **ACK OFF** (`a`) so messages don’t carry IDs.  
-- Use the **Heard** list + mouse to target quick replies without retyping callsigns.  
-- Keep the terminal at least **80×24** for the best layout.
-- Remember to press `q` instead of closing your terminal window to save changes and log.
-
----
-
 ## Troubleshooting
 
 - **Cannot connect to TNC** — ensure Direwolf (or your TNC) is running with KISS over TCP and that host/port match the config.
@@ -161,14 +135,3 @@ PRs are welcome. Please:
 
 ---
 
-## Changelog (recent)
-
-- TUI layout refinements; highlighted command bar and status line  
-- **Mouse selection** in Heard list + default destination behavior  
-- **Quick messages** (`1`/`2`) and **ACK toggle** (`a`)  
-- **Repeat last message/raw** (`r`/`t`)  
-- **Raw data** send mode (`d`)  
-- **Config persistence** with multiple candidate paths  
-- **File logging** with robust error handling
-
-*Updated: 2025-08-11*

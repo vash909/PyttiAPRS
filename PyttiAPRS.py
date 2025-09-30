@@ -97,6 +97,199 @@ import queue
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import json
+import re
+import math
+
+###############################################################################
+#                           Mic‑E decoding routine                             #
+###############################################################################
+
+def decode_mic_e(dest: str, info: bytes) -> Optional[str]:
+    """Attempt to decode a Mic‑E formatted APRS position packet.
+
+    Mic‑E is a compact position reporting format used by many APRS trackers
+    and radios.  The latitude, longitude, speed, course and symbol are
+    encoded in the six characters of the AX.25 destination callsign and the
+    first eight characters of the information field.  This helper converts
+    a Mic‑E packet into a normal uncompressed APRS position string using
+    the existing :func:`build_aprs_position` function.  A ``{mic-e}``
+    marker is appended to the resulting string so that Mic‑E packets can be
+    distinguished in the user interface.
+
+    If decoding fails for any reason (e.g. malformed destination or info
+    fields), ``None`` is returned and the caller should leave the packet
+    unchanged.
+
+    :param dest: Destination callsign including optional SSID (e.g.
+        ``"TRQP7T"``).  Only the first six characters of the callsign are
+        used for decoding.
+    :param info: The AX.25 information field beginning with the Mic‑E
+        data type identifier (either ``'`` or ``\x60``).  The routine
+        expects at least nine bytes: one type identifier plus eight data
+        bytes.
+    :return: An APRS position string with a ``{mic-e}`` suffix, or
+        ``None`` if the packet is not Mic‑E or cannot be decoded.
+    """
+    # Mic‑E packets use a data type identifier of apostrophe (0x27) or
+    # backtick (0x60).  Reject anything else.
+    if not info or info[0] not in (0x27, 0x60):
+        return None
+    # The Mic‑E information field must contain at least eight further bytes
+    # after the type identifier to hold longitude, speed/course and symbol.
+    if len(info) < 9:
+        return None
+    # Extract the destination callsign (strip SSID) and normalise to six
+    # uppercase characters.  Mic‑E encodes data into exactly six characters.
+    destcall = dest.split('-', 1)[0].upper()
+    if len(destcall) < 6:
+        return None
+    destcall = destcall[:6]
+    # Define per‑character decoding to extract latitude digit and flags.
+    # See Section 10 of the APRS v1.0 protocol specification for the
+    # mapping.  Each of the six bytes encodes a latitude digit plus one
+    # additional flag bit indicating N/S, longitude offset or E/W.
+    lat_digits: List[str] = []
+    ns_indicator: Optional[str] = None  # 'N' or 'S'
+    lon_offset = 0  # 0 or 100 degrees
+    we_indicator: Optional[str] = None  # 'E' or 'W'
+    for idx, ch in enumerate(destcall):
+        if '0' <= ch <= '9':
+            # Numeric digits map directly; message bits are zero.
+            lat_digit = ch
+            flag_ns = 'S'
+            flag_offset = 0
+            flag_we = 'E'
+        elif 'A' <= ch <= 'J':
+            # A–J map to 0–9 and indicate custom message type.
+            # ord('A')=65 -> 65-17=48 ('0'), ord('J')=74 ->57 ('9').
+            lat_digit = chr(ord(ch) - 17)
+            flag_ns = 'S'
+            flag_offset = 0
+            flag_we = 'E'
+        elif ch in ('K', 'L'):
+            # K or L represent a space (ambiguous digit) and custom message.
+            lat_digit = ' '
+            flag_ns = 'S'
+            flag_offset = 0
+            flag_we = 'E'
+        elif 'P' <= ch <= 'Y':
+            # P–Y map to 0–9 and indicate standard message, north and west
+            lat_digit = chr(ord(ch) - 32)
+            flag_ns = 'N'
+            flag_offset = 100
+            flag_we = 'W'
+        elif ch == 'Z':
+            # Z represents a space (ambiguous digit) and standard message.
+            lat_digit = ' '
+            flag_ns = 'N'
+            flag_offset = 100
+            flag_we = 'W'
+        else:
+            # Unknown character – not Mic‑E
+            return None
+        lat_digits.append(lat_digit)
+        # Assign indicators based on character position
+        if idx == 3:
+            ns_indicator = flag_ns
+        elif idx == 4:
+            lon_offset = flag_offset
+        elif idx == 5:
+            we_indicator = flag_we
+    # Ensure indicators are set
+    if ns_indicator is None:
+        ns_indicator = 'N'
+    if we_indicator is None:
+        we_indicator = 'E'
+    # Replace ambiguous digits (spaces) with '0' for numeric conversion.
+    lat_digits_str = ''.join(ch if ch.isdigit() else '0' for ch in lat_digits)
+    # Compute latitude degrees and minutes.  The first two digits are degrees,
+    # the next two digits are minutes and the last two are hundredths of
+    # minutes.  Convert to decimal degrees.
+    try:
+        lat_deg = int(lat_digits_str[0:2])
+        lat_min = int(lat_digits_str[2:4])
+        lat_hun = int(lat_digits_str[4:6])
+    except Exception:
+        return None
+    lat_val = lat_deg + (lat_min + lat_hun / 100.0) / 60.0
+    if ns_indicator == 'S':
+        lat_val = -lat_val
+    # Extract the Mic‑E encoded data bytes from the information field.  The
+    # first byte (index 0) is the type identifier, so longitude begins at
+    # index 1.  The order is: d+28, m+28, h+28, SP+28, DC+28, SE+28,
+    # symbol code, symbol table.
+    dplus = info[1]
+    mplus = info[2]
+    hplus = info[3]
+    spplus = info[4]
+    dcplus = info[5]
+    seplus = info[6]
+    # Decode longitude degrees and minutes.  Per spec, subtract 28 from
+    # each value and adjust for wrap‑arounds.
+    lon_deg = dplus - 28 + lon_offset
+    lon_min = mplus - 28
+    if lon_min >= 60:
+        lon_min -= 60
+    lon_hun = hplus - 28
+    if lon_hun >= 100:
+        lon_hun -= 100
+    lon_val = lon_deg + (lon_min + lon_hun / 100.0) / 60.0
+    # Apply east/west indicator
+    if we_indicator == 'W':
+        lon_val = -lon_val
+    # Decode speed and course.  The specification defines a simple
+    # arithmetic method to extract these values from SP+28, DC+28 and
+    # SE+28 bytes【265601970696074†L4783-L4846】.  See Section 10.10.3.
+    sp_val = spplus - 28
+    dc_val = dcplus - 28
+    se_val = seplus - 28
+    # Speed in tens of knots
+    speed_tens = sp_val * 10
+    # Units of speed and hundreds of degrees of course are packed into
+    # DC+28: divide by 10 to get units of speed, and take the remainder
+    # for the course hundreds.
+    units_speed = dc_val // 10
+    course_hundreds = dc_val % 10
+    speed_knots = speed_tens + units_speed
+    # Wrap speed around if >= 800 knots
+    if speed_knots >= 800:
+        speed_knots -= 800
+    # Course tens and units come directly from SE+28 plus the hundreds
+    # derived above.  Combine to form the full course.
+    course_deg = (course_hundreds * 100) + se_val
+    # Wrap course around if >= 400 degrees (per spec)
+    if course_deg >= 400:
+        course_deg -= 400
+    # Symbol code and table: positions 7 and 8 after the type byte.
+    try:
+        symbol_code = chr(info[7])
+    except Exception:
+        symbol_code = '>'
+    try:
+        symbol_table = chr(info[8])
+    except Exception:
+        symbol_table = '/'
+    # Remaining bytes constitute optional telemetry or status/comment.  Decode
+    # them verbatim using latin1, stripping leading/trailing whitespace.
+    comment_bytes = info[9:]
+    try:
+        comment = comment_bytes.decode('latin1').strip()
+    except Exception:
+        comment = ''
+    # Use the existing helper to construct a standard uncompressed position
+    # string.  Append the comment, and also include speed and course as
+    # human‑readable text if available.  Represent speed in knots and
+    # course in degrees for simplicity.  Finally append a {mic-e}
+    # marker so that the UI can identify Mic‑E packets.【265601970696074†L4783-L4846】
+    spd_course_comment = f" cse/spd={course_deg:.0f}/{speed_knots:.0f}kts"
+    full_comment = (spd_course_comment + (' ' + comment if comment else '')).rstrip()
+    payload_bytes = build_aprs_position(lat_val, lon_val, symbol_table, symbol_code, full_comment)
+    try:
+        payload_str = payload_bytes.decode('ascii')
+    except Exception:
+        return None
+    # Append Mic‑E identifier.  Use curly braces to distinguish.
+    return payload_str + '{mic-e}'
 
 # Potential locations for the configuration file.  The program will
 # search for a saved configuration in these locations in order and will
@@ -985,6 +1178,25 @@ class APRSTUI:
                     self.messages.append((ts, src, dest, info, path))
                     continue
                     self._log_message(ts, src, dest, info, path)
+
+            # Attempt to decode Mic‑E packets.  This is done after
+            # acknowledgement handling so that Mic‑E position reports are
+            # converted to a human‑readable uncompressed form.  If the
+            # decoder returns a string, replace the info bytes with the
+            # decoded payload.  Use a try/except to avoid failing on
+            # unexpected data.
+            try:
+                decoded = decode_mic_e(dest, info)
+            except Exception:
+                decoded = None
+            if decoded is not None:
+                # encode back to bytes using ASCII (fallback latin1) so that
+                # downstream code continues to work with bytes
+                try:
+                    info = decoded.encode('ascii', 'replace')
+                except Exception:
+                    info = decoded.encode('latin1', 'replace')
+
             # Save message; display the path exactly as provided by the TNC
             self.messages.append((ts, src, dest, info, path))
             self._log_message(ts, src, dest, info, path)

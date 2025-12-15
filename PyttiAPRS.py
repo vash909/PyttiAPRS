@@ -993,6 +993,21 @@ class APRSTUI:
                 text = info.decode('latin1') if isinstance(info, (bytes, bytearray)) else str(info)
             except Exception:
                 text = str(info)
+            # Sanitize the decoded text to avoid embedded nulls or other
+            # control characters being written to the log.  Replace any
+            # null bytes with a space and drop other control codes below
+            # 0x20 (except for whitespace).  See similar sanitisation in
+            # the _draw method for rationale.
+            if isinstance(text, str):
+                sanitized_chars = []
+                for ch in text:
+                    if ch == '\x00':
+                        sanitized_chars.append(' ')
+                    elif ord(ch) < 32 and ch not in ('\t', '\n', '\r'):
+                        continue
+                    else:
+                        sanitized_chars.append(ch)
+                text = ''.join(sanitized_chars)
             # Build a compact header: SRC> DEST PATH: text
             parts = []
             if dest:
@@ -1056,6 +1071,22 @@ class APRSTUI:
                 text = info.decode('latin1')
             except Exception:
                 text = str(info)
+            # Sanitize the decoded text before displaying it.  Some
+            # received packets may include embedded null bytes (\x00)
+            # or other control characters that cannot be printed by
+            # curses.  Replace NULs with a space and drop other
+            # non‑whitespace control characters below 0x20.
+            if isinstance(text, str):
+                sanitized_chars = []
+                for ch in text:
+                    if ch == '\x00':
+                        sanitized_chars.append(' ')
+                    elif ord(ch) < 32 and ch not in ('\t', '\n', '\r'):
+                        # skip other control characters
+                        continue
+                    else:
+                        sanitized_chars.append(ch)
+                text = ''.join(sanitized_chars)
             
 # Build path string if present
             path_str = ''

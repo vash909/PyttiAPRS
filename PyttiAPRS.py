@@ -691,7 +691,7 @@ class StationConfig:
     longitude: float = 0.0
     symbol_table: str = '/'
     symbol_code: str = '>'
-    host: str = '192.168.178.27'
+    host: str = 'localhost'
     port: int = 8001
     msg_id_counter: int = 1
     pos_comment: str = ''  # default comment for position beacons
@@ -1631,7 +1631,7 @@ def main(stdscr: curses.window) -> None:
             longitude=saved.get('longitude', 0.0),
             symbol_table=saved.get('symbol_table', '/'),
             symbol_code=saved.get('symbol_code', '>'),
-            host=saved.get('host', '192.168.178.27'),
+            host=saved.get('host', 'localhost'),
             port=saved.get('port', 8001),
             pos_comment=saved.get('pos_comment', ''),
             quick_msg1=saved.get('quick_msg1', 'QSL? 73'),
@@ -1649,7 +1649,7 @@ def main(stdscr: curses.window) -> None:
             longitude=0.0,
             symbol_table='/',
             symbol_code='>',
-            host='192.168.178.27',
+            host='localhost',
             port=8001,
         )
         # Use curses prompts to obtain callsign and position

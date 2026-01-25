@@ -1,92 +1,5 @@
 #!/usr/bin/env python3
-"""
-aprs_tui.py
-==============
-
-This script implements a simple terminal user interface (TUI) for making
-APRS AX.25 contacts via a KISS‑compatible TNC such as Direwolf.  The
-application connects to a KISS TCP port, encodes APRS position and
-message frames and displays incoming packets in a scrolling window.
-
-Features
---------
-
-* **KISS connectivity:**  Connects to a KISS TNC running on the local
-  machine (host/port configurable).  The program performs basic KISS
-  framing and unframing without relying on external libraries.
-* **AX.25 encoding/decoding:**  Minimal routines for encoding and
-  decoding AX.25 UI frames are included.  Only unconnected (UI) frames
-  are supported; connected AX.25 sessions are beyond the scope of this
-  application.
-* **APRS message support:**  Messages can be composed and sent to
-  another station.  The addressee field is padded to nine characters as
-  required by the APRS standard【287604055694888†L1110-L1154】.  An optional
-  message ID is appended automatically to each outgoing message to
-  facilitate acknowledgements.  Received message acknowledgements are
-  recognised and printed in the log.
-* **APRS position support:**  A position beacon (uncompressed format)
-  can be transmitted on demand.  Latitude/longitude, symbol table
-  selector and symbol code can be configured.
-* **Heard stations:**  A side panel lists unique callsigns heard since
-  startup.
-* **Configurable station parameters:**  Callsign (including SSID), the
-  software identifier (destination callsign), digipeater path, KISS
-  host/port and position parameters can be edited from within the
-  application.
-
-This program is intentionally self‑contained and does not require
-external dependencies such as the ``kiss3`` or ``ax253`` packages.  It
-is not intended to be a drop‑in replacement for sophisticated APRS
-clients such as UISS but provides the core features required for
-satellite APRS messaging via a local TNC.
-
-Usage
------
-
-Run the script from a terminal capable of 80×24 characters or larger:
-
-```
-$ python3 aprs_tui.py
-```
-
-When started for the first time the program will prompt for basic
-station settings: your callsign (with optional SSID), a software
-identifier (“tocall”), digipeater path and position.  These values
-persist only for the current session.  The bottom line shows a list
-of single‑character commands:
-
-```
-m → compose and send an APRS message
-p → send a position beacon
-c → change station settings
-q → quit the program
-```
-
-The main window displays received packets with timestamps.  A side bar
-shows a list of unique stations heard.  The user interface is built
-using the standard ``curses`` module and avoids external libraries.
-
-Limitations
------------
-
-* Only unconnected UI frames are decoded.  Frames containing
-  connected‑mode supervisory or information packets will be ignored.
-* The AX.25 encoding implemented here uses the commonly used scheme
-  where bits 5 and 6 of the SSID byte are set to 1 and bit 0
-  indicates end of address field.  This matches the typical encoding
-  used by software TNCs such as Direwolf and by the example code
-  available online【677775699448989†L41-L46】.  It differs from the
-  implementation found in the ``ax253`` library (which uses bit 7
-  instead of bit 0 for the HDLC flag) but works correctly with
-  Direwolf's KISS implementation.
-* Message acknowledgements are recognised but the program does not
-  automatically retry unacknowledged messages.
-
-Author: Lorenzo Gianlorenzi IU1BOT - iu1bot@xzgroup.net
-License: This code is provided under the Apache 2.0 licence.  Portions
-of the APRS message formatting are based on the published APRS
-specification【287604055694888†L1110-L1154】 and are in the public domain.
-"""
+# PyttiAPRS V1.3 - 25/01/2026 by Lorenzo IU1BOT 1XZ001
 
 import curses
 import os
@@ -105,31 +18,7 @@ import math
 ###############################################################################
 
 def decode_mic_e(dest: str, info: bytes) -> Optional[str]:
-    """Attempt to decode a Mic‑E formatted APRS position packet.
 
-    Mic‑E is a compact position reporting format used by many APRS trackers
-    and radios.  The latitude, longitude, speed, course and symbol are
-    encoded in the six characters of the AX.25 destination callsign and the
-    first eight characters of the information field.  This helper converts
-    a Mic‑E packet into a normal uncompressed APRS position string using
-    the existing :func:`build_aprs_position` function.  A ``{mic-e}``
-    marker is appended to the resulting string so that Mic‑E packets can be
-    distinguished in the user interface.
-
-    If decoding fails for any reason (e.g. malformed destination or info
-    fields), ``None`` is returned and the caller should leave the packet
-    unchanged.
-
-    :param dest: Destination callsign including optional SSID (e.g.
-        ``"TRQP7T"``).  Only the first six characters of the callsign are
-        used for decoding.
-    :param info: The AX.25 information field beginning with the Mic‑E
-        data type identifier (either ``'`` or ``\x60``).  The routine
-        expects at least nine bytes: one type identifier plus eight data
-        bytes.
-    :return: An APRS position string with a ``{mic-e}`` suffix, or
-        ``None`` if the packet is not Mic‑E or cannot be decoded.
-    """
     # Mic‑E packets use a data type identifier of apostrophe (0x27) or
     # backtick (0x60).  Reject anything else.
     if not info or info[0] not in (0x27, 0x60):

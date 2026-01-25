@@ -63,7 +63,7 @@ No third‑party Python dependencies.
 2. Run:
 
 ```bash
-python3 aprs_tui.py
+python3 pyttiAPRS.py
 ```
 
 3. On first run, you’ll be prompted for:

@@ -1,6 +1,13 @@
 # PyttiAPRS — APRS TUI over KISS (Direwolf‑compatible)
 > FOR USER GUIDE CHECK: `user_guide_en.md`
 
+25/01/2026:
+- Add prompts to configure the KISS/TNC connection host (IP/DNS) and port during the initial interactive setup.
+- Extend the in-app configuration editor (key c) to edit the same host/port values.
+- Keep defaults (localhost:8001) when the user leaves the fields empty.
+- Persist the selected host/port in the saved config so the next run reconnects to the chosen endpoint. 
+
+
 30/09/2025: added mic-e decoding support.
 
 Telegram user group: **https://t.me/pyttiaprs**

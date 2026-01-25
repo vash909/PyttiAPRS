@@ -802,7 +802,7 @@ class StationConfig:
     longitude: float = 0.0
     symbol_table: str = '/'
     symbol_code: str = '>'
-    host: str = 'localhost'
+    host: str = '192.168.178.27'
     port: int = 8001
     msg_id_counter: int = 1
     pos_comment: str = ''  # default comment for position beacons
@@ -1468,6 +1468,19 @@ class APRSTUI:
             )
             if pos_comm is None:
                 return
+            # Ask for KISS host and port so that the user can modify the
+            # connection details of the TNC.  These values are optional;
+            # pressing Enter without typing retains the current value.
+            new_host = self._prompt_cancelable(
+                f"KISS host (current {self.cfg.host}): ", self.cfg.host
+            )
+            if new_host is None:
+                return
+            new_port_str = self._prompt_cancelable(
+                f"KISS port (current {self.cfg.port}): ", str(self.cfg.port)
+            )
+            if new_port_str is None:
+                return
             # All prompts succeeded: update configuration
             # Callsign
             if new_call:
@@ -1509,6 +1522,16 @@ class APRSTUI:
             # Default comment
             if pos_comm is not None:
                 self.cfg.pos_comment = pos_comm
+            # KISS host
+            if new_host:
+                self.cfg.host = new_host.strip()
+            # KISS port
+            if new_port_str:
+                try:
+                    self.cfg.port = int(new_port_str)
+                except Exception:
+                    # Leave existing port unchanged if conversion fails
+                    pass
         finally:
             # Restore non‑blocking mode
             self.stdscr.nodelay(True)
@@ -1719,7 +1742,7 @@ def main(stdscr: curses.window) -> None:
             longitude=saved.get('longitude', 0.0),
             symbol_table=saved.get('symbol_table', '/'),
             symbol_code=saved.get('symbol_code', '>'),
-            host=saved.get('host', 'localhost'),
+            host=saved.get('host', '192.168.178.27'),
             port=saved.get('port', 8001),
             pos_comment=saved.get('pos_comment', ''),
             quick_msg1=saved.get('quick_msg1', 'QSL? 73'),
@@ -1737,7 +1760,7 @@ def main(stdscr: curses.window) -> None:
             longitude=0.0,
             symbol_table='/',
             symbol_code='>',
-            host='localhost',
+            host='192.168.178.27',
             port=8001,
         )
         # Use curses prompts to obtain callsign and position
@@ -1847,6 +1870,34 @@ def main(stdscr: curses.window) -> None:
         comment_input = stdscr.getstr().decode('utf-8').strip()
         curses.noecho()
         cfg.pos_comment = comment_input
+
+        # Ask the user for the KISS TNC host.  This allows connecting to
+        # a remote TNC (e.g. a modem on the local network).  Leave blank
+        # to retain the default value of 'localhost'.
+        curses.echo()
+        row += 1
+        stdscr.addstr(row, 0, "KISS host (IP or hostname) (default localhost): ")
+        stdscr.clrtoeol()
+        stdscr.refresh()
+        host_input = stdscr.getstr().decode('utf-8').strip()
+        curses.noecho()
+        if host_input:
+            cfg.host = host_input
+        # Ask the user for the KISS port.  Leave blank to retain the
+        # default value of 8001.  If a non‑integer is entered, ignore it.
+        curses.echo()
+        row += 1
+        stdscr.addstr(row, 0, "KISS port (default 8001): ")
+        stdscr.clrtoeol()
+        stdscr.refresh()
+        port_input = stdscr.getstr().decode('utf-8').strip()
+        curses.noecho()
+        if port_input:
+            try:
+                cfg.port = int(port_input)
+            except Exception:
+                # Ignore invalid port numbers and keep the default
+                pass
     # Clear screen before starting UI
     stdscr.erase()
     stdscr.refresh()

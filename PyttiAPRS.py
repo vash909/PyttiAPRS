@@ -935,6 +935,27 @@ class APRSTUI:
             # Logging failures should never crash the UI
             pass
 
+    @staticmethod
+    def _find_exact_callsign(text_upper: str, cs: str) -> int:
+        """Find `cs` in `text_upper` as a whole token, not a substring.
+
+        A plain substring search matches e.g. "IU1BOT-1" inside
+        "IU1BOT-13", wrongly highlighting other stations' calls that
+        merely share a prefix. Require non-alphanumeric (or string
+        boundary) characters immediately before and after the match.
+        """
+        start = 0
+        while True:
+            idx = text_upper.find(cs, start)
+            if idx < 0:
+                return -1
+            end = idx + len(cs)
+            before_ok = idx == 0 or not text_upper[idx - 1].isalnum()
+            after_ok = end == len(text_upper) or not text_upper[end].isalnum()
+            if before_ok and after_ok:
+                return idx
+            start = idx + 1
+
     # UI helper to draw the interface
     def _draw(self) -> None:
         self.stdscr.erase()
@@ -1028,7 +1049,7 @@ class APRSTUI:
             row_pos = 3 + i * 3
             # Highlight our callsign on header
             cs = self.cfg.callsign.upper()
-            idx = header_tr.upper().find(cs) if cs else -1
+            idx = self._find_exact_callsign(header_tr.upper(), cs) if cs else -1
             if idx >= 0:
                 if idx > 0:
                     self.stdscr.addstr(row_pos, 0, header_tr[:idx], self._pkt_header_attr)
@@ -1046,7 +1067,7 @@ class APRSTUI:
             cs = self.cfg.callsign.upper() if self.cfg.callsign else ''
             if cs:
                 body_upper = body_tr.upper()
-                idx_body = body_upper.find(cs)
+                idx_body = self._find_exact_callsign(body_upper, cs)
             else:
                 idx_body = -1
             if idx_body >= 0:

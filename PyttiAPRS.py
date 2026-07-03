@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# PyttiAPRS V1.3 - 25/01/2026 by Lorenzo IU1BOT 1XZ001
+# PyttiAPRS V0.4 - 03/07/2026 by Lorenzo "Vash" IU1BOT
 
 import curses
 import os
@@ -730,14 +730,38 @@ class APRSTUI:
         curses.curs_set(0)
         self.stdscr.nodelay(True)
         self.stdscr.timeout(100)
-        # Enable colour if supported; colour 1 used to highlight our callsign
+        # Enable colour if supported.  Each pair is assigned a specific role
+        # so that the layout stays visually organised: colour 1 highlights
+        # our own callsign wherever it appears, and the others tint fixed
+        # regions of the screen (status bar, command bar, section titles,
+        # packet headers/bodies and the heard list) to help the eye jump
+        # straight to the right area.
         try:
             curses.start_color()
+            curses.use_default_colors()
             curses.init_pair(1, curses.COLOR_YELLOW, -1)
+            curses.init_pair(2, curses.COLOR_CYAN, -1)
+            curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            curses.init_pair(4, curses.COLOR_GREEN, -1)
+            curses.init_pair(5, curses.COLOR_WHITE, -1)
+            curses.init_pair(6, curses.COLOR_CYAN, -1)
+            curses.init_pair(7, curses.COLOR_BLUE, -1)
             self._highlight_attr = curses.color_pair(1) | curses.A_BOLD
+            self._status_attr = curses.color_pair(2) | curses.A_BOLD
+            self._cmdbar_attr = curses.color_pair(3) | curses.A_BOLD
+            self._title_attr = curses.color_pair(4) | curses.A_BOLD
+            self._pkt_header_attr = curses.color_pair(5) | curses.A_BOLD
+            self._heard_attr = curses.color_pair(6)
+            self._pkt_body_attr = curses.color_pair(7)
         except Exception:
-            # Fallback attribute if colours are unavailable
+            # Fallback attributes if colours are unavailable
             self._highlight_attr = curses.A_REVERSE
+            self._status_attr = curses.A_BOLD
+            self._cmdbar_attr = curses.A_REVERSE
+            self._title_attr = curses.A_BOLD
+            self._pkt_header_attr = curses.A_BOLD
+            self._heard_attr = curses.A_NORMAL
+            self._pkt_body_attr = curses.A_NORMAL
 
         # Track whether acknowledgements (message IDs) are appended to outgoing
         # messages.  APRS over satellites may not support ACKs, so this can
@@ -918,12 +942,12 @@ class APRSTUI:
         # Header line with station info
         status = (
             f"CALL {self.cfg.callsign} TOCALL {self.cfg.tocall} PATH "
-            f"{'-'.join(self.cfg.path) if self.cfg.path else 'NONE'} "
+            f"{','.join(self.cfg.path) if self.cfg.path else 'NONE'} "
             f"LAT {self.cfg.latitude:.4f} LON {self.cfg.longitude:.4f} "
             f"SYM {self.cfg.symbol_table}{self.cfg.symbol_code} "
             f"ACK {'ON' if self.ack_enabled else 'OFF'}"
         )
-        self.stdscr.addstr(0, 0, status[:width - 1])
+        self.stdscr.addstr(0, 0, status[:width - 1], self._status_attr)
         # Commands line.  Include commands for clearing messages and the heard list,
         # toggling acknowledgements, and resending the last message.
         # Build the command bar dynamically so that the quick message labels
@@ -939,7 +963,7 @@ class APRSTUI:
         # Highlight the command bar to distinguish available keys.  Use
         # reverse video for visibility; if reverse video is not available
         # curses will fall back to a reasonable attribute.
-        self.stdscr.addstr(1, 0, cmd_line[:width - 1], curses.A_REVERSE)
+        self.stdscr.addstr(1, 0, cmd_line[:width - 1], self._cmdbar_attr)
         # Determine areas
         # Reserve two lines at the bottom (one blank and one for prompts) to
         # ensure that input prompts do not overlap with the scrolling message
@@ -948,7 +972,7 @@ class APRSTUI:
         msgs_height = height - 5
         msgs_width = width - 20
         # Draw messages box
-        self.stdscr.addstr(2, 0, "Received packets:", curses.A_BOLD)
+        self.stdscr.addstr(2, 0, "Received packets:", self._title_attr)
         # Show last messages
         packets_fit = max(1, msgs_height // 3)
         displayed = self.messages[-packets_fit:]
@@ -1007,13 +1031,13 @@ class APRSTUI:
             idx = header_tr.upper().find(cs) if cs else -1
             if idx >= 0:
                 if idx > 0:
-                    self.stdscr.addstr(row_pos, 0, header_tr[:idx])
+                    self.stdscr.addstr(row_pos, 0, header_tr[:idx], self._pkt_header_attr)
                 cs_end = min(idx + len(cs), len(header_tr))
                 self.stdscr.addstr(row_pos, idx, header_tr[idx:cs_end], self._highlight_attr)
                 if cs_end < len(header_tr):
-                    self.stdscr.addstr(row_pos, cs_end, header_tr[cs_end:])
+                    self.stdscr.addstr(row_pos, cs_end, header_tr[cs_end:], self._pkt_header_attr)
             else:
-                self.stdscr.addstr(row_pos, 0, header_tr)
+                self.stdscr.addstr(row_pos, 0, header_tr, self._pkt_header_attr)
             # Body and blank separator
             # Highlight our callsign if it appears anywhere in the body.  This
             # allows quick identification of replies addressed to us.  Search
@@ -1028,21 +1052,21 @@ class APRSTUI:
             if idx_body >= 0:
                 # Print portion before our callsign
                 if idx_body > 0:
-                    self.stdscr.addstr(row_pos + 1, 0, body_tr[:idx_body])
+                    self.stdscr.addstr(row_pos + 1, 0, body_tr[:idx_body], self._pkt_body_attr)
                 # Highlight the callsign
                 cs_end = min(idx_body + len(cs), len(body_tr))
                 self.stdscr.addstr(row_pos + 1, idx_body, body_tr[idx_body:cs_end], self._highlight_attr)
                 # Print remainder after the callsign, if any
                 if cs_end < len(body_tr):
-                    self.stdscr.addstr(row_pos + 1, cs_end, body_tr[cs_end:])
+                    self.stdscr.addstr(row_pos + 1, cs_end, body_tr[cs_end:], self._pkt_body_attr)
             else:
-                self.stdscr.addstr(row_pos + 1, 0, body_tr)
+                self.stdscr.addstr(row_pos + 1, 0, body_tr, self._pkt_body_attr)
             # row_pos + 2 left intentionally blank
         # Draw heard stations.  Reserve the bottom line for prompts by limiting
         # the height of the list to match the messages area.  Without this
         # constraint the heard list would overwrite the prompt line when the
         # screen is full, causing the input prompt to appear mid‑screen.
-        self.stdscr.addstr(2, msgs_width, "Heard:", curses.A_BOLD)
+        self.stdscr.addstr(2, msgs_width, "Heard:", self._title_attr)
         # Convert the heard set into a sorted list to provide a stable
         # ordering for display and mouse selection.  Store it on
         # self.current_heard_list so the mouse handler can map row
@@ -1061,7 +1085,7 @@ class APRSTUI:
             if self.selected_heard and call.upper() == self.selected_heard.upper():
                 self.stdscr.addstr(row, msgs_width, call[:19], self._highlight_attr)
             else:
-                self.stdscr.addstr(row, msgs_width, call[:19])
+                self.stdscr.addstr(row, msgs_width, call[:19], self._heard_attr)
 
         # Draw a vertical separator between the message area and the heard list
         # for a cleaner layout.  Use ACS_VLINE if available; otherwise fall back
@@ -1307,8 +1331,8 @@ class APRSTUI:
                 return
             # Digipeater path
             path_str = self._prompt_cancelable(
-                f"Digipeater path comma separated (current {'-'.join(self.cfg.path)}): ",
-                '-'.join(self.cfg.path)
+                f"Digipeater path comma separated (current {','.join(self.cfg.path)}): ",
+                ','.join(self.cfg.path)
             )
             if path_str is None:
                 return
@@ -1623,10 +1647,19 @@ def main(stdscr: curses.window) -> None:
     saved = load_saved_config()
     if saved:
         # Populate StationConfig from saved data
+        raw_path = saved.get('path', [])
+        if isinstance(raw_path, str):
+            raw_path = [raw_path]
+        normalized_path = [
+            p.strip().upper()
+            for item in raw_path
+            for p in str(item).replace(',', ' ').split()
+            if p.strip()
+        ]
         cfg = StationConfig(
             callsign=saved.get('callsign', ''),
             tocall=saved.get('tocall', 'APZ001'),
-            path=saved.get('path', []),
+            path=normalized_path,
             latitude=saved.get('latitude', 0.0),
             longitude=saved.get('longitude', 0.0),
             symbol_table=saved.get('symbol_table', '/'),

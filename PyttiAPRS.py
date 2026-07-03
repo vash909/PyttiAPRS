@@ -1204,53 +1204,76 @@ class APRSTUI:
             or ``None`` if cancelled.
         """
         # Ensure we are in blocking mode during interactive input; the caller
-        # should have already set nodelay(False).
-        curses.echo()
-        # Clear bottom line and write prompt.  Compute the bottom row and
-        # width dynamically to handle terminal resizes.  Without this
-        # adjustment the prompt can appear mid‑screen when the message
-        # list wraps down to what curses.LINES believes is the last
-        # line.  Using getmaxyx() ensures we always target the true
-        # last line of the current screen.
-        height, width = self.stdscr.getmaxyx()
-        bottom_y = height - 1
-        self.stdscr.addstr(bottom_y, 0, ' ' * (width - 1))
-        self.stdscr.addstr(bottom_y, 0, prompt)
-        self.stdscr.refresh()
-        # Build the input string character by character
-        buffer: List[str] = []
-        x_pos = len(prompt)
-        while True:
-            try:
-                ch = self.stdscr.getch()
-            except Exception:
-                continue
-            # Enter key (carriage return or newline) finalises input
-            if ch in (10, 13):
-                break
-            # Escape key cancels input
-            if ch == 27:  # ESC
-                curses.noecho()
-                return None
-            # Backspace handling (support DEL and Backspace)
-            if ch in (curses.KEY_BACKSPACE, 127, 8):
-                if buffer:
-                    buffer.pop()
-                    x_pos -= 1
-                    # Overwrite the last character with space and move cursor back
-                    self.stdscr.addstr(bottom_y, len(prompt) + x_pos, ' ')
-                    self.stdscr.move(bottom_y, len(prompt) + x_pos)
-                    self.stdscr.refresh()
-                continue
-            # Ignore other control characters
-            if ch < 32:
-                continue
-            # Add printable character
-            buffer.append(chr(ch))
-            self.stdscr.addch(bottom_y, len(prompt) + x_pos, ch)
-            x_pos += 1
-            self.stdscr.refresh()
+        # should have already set nodelay(False).  Echo is disabled because
+        # this method redraws the editable line itself.
         curses.noecho()
+        buffer: List[str] = []
+
+        def _fit_prompt(text: str, usable_width: int) -> str:
+            if usable_width <= 0:
+                return ''
+            # Leave at least one column for input; for longer prompts, keep a
+            # small edit area visible even when the terminal is narrow.
+            if len(text) < usable_width:
+                return text
+            min_input_width = min(20, max(1, usable_width // 3))
+            prompt_width = max(0, usable_width - min_input_width)
+            if prompt_width <= 0:
+                return ''
+            if prompt_width <= 3:
+                return text[:prompt_width]
+            return text[:prompt_width - 3] + '...'
+
+        def _redraw_prompt() -> None:
+            # Re-read dimensions on every draw so terminal resizes during
+            # input cannot leave the cursor outside the screen.
+            height, width = self.stdscr.getmaxyx()
+            bottom_y = max(0, height - 1)
+            usable_width = max(0, width - 1)
+            prompt_text = _fit_prompt(prompt, usable_width)
+            input_width = max(1, usable_width - len(prompt_text))
+            input_text = ''.join(buffer)
+            visible_input = input_text[-input_width:]
+            line = (prompt_text + visible_input)[:usable_width]
+
+            self.stdscr.move(bottom_y, 0)
+            self.stdscr.clrtoeol()
+            if line:
+                self.stdscr.addstr(bottom_y, 0, line)
+            if width > 0:
+                cursor_x = min(len(prompt_text) + len(visible_input), max(0, usable_width - 1))
+                self.stdscr.move(bottom_y, cursor_x)
+            self.stdscr.refresh()
+
+        try:
+            _redraw_prompt()
+            while True:
+                try:
+                    ch = self.stdscr.getch()
+                except Exception:
+                    continue
+                if ch == curses.KEY_RESIZE:
+                    _redraw_prompt()
+                    continue
+                # Enter key (carriage return or newline) finalises input
+                if ch in (10, 13):
+                    break
+                # Escape key cancels input
+                if ch == 27:  # ESC
+                    return None
+                # Backspace handling (support DEL and Backspace)
+                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                    if buffer:
+                        buffer.pop()
+                        _redraw_prompt()
+                    continue
+                # Ignore control characters and curses special-key values
+                if ch < 32 or ch > 255:
+                    continue
+                buffer.append(chr(ch))
+                _redraw_prompt()
+        finally:
+            curses.noecho()
         # If no input provided and a default exists, return default
         if not buffer:
             return default if default else ''

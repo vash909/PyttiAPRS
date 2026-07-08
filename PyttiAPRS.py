@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # PyttiAPRS V0.4 - 03/07/2026 by Lorenzo "Vash" IU1BOT
-
+#    ____        __  __  _ ___    ____  ____  _____
+#   / __ \__  __/ /_/ /_(_)   |  / __ \/ __ \/ ___/
+#  / /_/ / / / / __/ __/ / /| | / /_/ / /_/ /\__ \ 
+# / ____/ /_/ / /_/ /_/ / ___ |/ ____/ _, _/___/ / 
+#/_/    \__, /\__/\__/_/_/  |_/_/   /_/ |_|/____/  
+#      /____/  
+                                                                                                                                                                                                           
 import curses
 import os
 import socket
@@ -720,9 +726,11 @@ class APRSTUI:
         self.stdscr = stdscr
         self.cfg = cfg
         self.tnc = tnc
-        # Received messages: list of (timestamp, source, dest, info_bytes, path)
+        # Logged packets: list of (timestamp, source, dest, info_bytes, path, is_tx)
         # The path is a list of digipeaters through which the packet travelled.
-        self.messages: List[Tuple[float, str, str, bytes, List[str]]] = []
+        # is_tx marks packets transmitted by this station so the UI can colour
+        # them differently from received ones.
+        self.messages: List[Tuple[float, str, str, bytes, List[str], bool]] = []
         self.heard: set = set()
         self.heard_times: dict = {}
         self.msg_queue: queue.Queue = tnc.msg_queue
@@ -746,22 +754,26 @@ class APRSTUI:
             curses.init_pair(5, curses.COLOR_WHITE, -1)
             curses.init_pair(6, curses.COLOR_CYAN, -1)
             curses.init_pair(7, curses.COLOR_BLUE, -1)
+            curses.init_pair(8, curses.COLOR_RED, -1)
+            curses.init_pair(9, curses.COLOR_GREEN, -1)
             self._highlight_attr = curses.color_pair(1) | curses.A_BOLD
             self._status_attr = curses.color_pair(2) | curses.A_BOLD
+            self._status_value_attr = curses.color_pair(5)
             self._cmdbar_attr = curses.color_pair(3) | curses.A_BOLD
             self._title_attr = curses.color_pair(4) | curses.A_BOLD
-            self._pkt_header_attr = curses.color_pair(5) | curses.A_BOLD
             self._heard_attr = curses.color_pair(6)
-            self._pkt_body_attr = curses.color_pair(7)
+            self._tx_attr = curses.color_pair(8)
+            self._rx_attr = curses.color_pair(9)
         except Exception:
             # Fallback attributes if colours are unavailable
             self._highlight_attr = curses.A_REVERSE
             self._status_attr = curses.A_BOLD
+            self._status_value_attr = curses.A_NORMAL
             self._cmdbar_attr = curses.A_REVERSE
             self._title_attr = curses.A_BOLD
-            self._pkt_header_attr = curses.A_BOLD
             self._heard_attr = curses.A_NORMAL
-            self._pkt_body_attr = curses.A_NORMAL
+            self._tx_attr = curses.A_BOLD
+            self._rx_attr = curses.A_NORMAL
 
         # Track whether acknowledgements (message IDs) are appended to outgoing
         # messages.  APRS over satellites may not support ACKs, so this can
@@ -960,15 +972,28 @@ class APRSTUI:
     def _draw(self) -> None:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-        # Header line with station info
-        status = (
-            f"CALL {self.cfg.callsign} TOCALL {self.cfg.tocall} PATH "
-            f"{','.join(self.cfg.path) if self.cfg.path else 'NONE'} "
-            f"LAT {self.cfg.latitude:.4f} LON {self.cfg.longitude:.4f} "
-            f"SYM {self.cfg.symbol_table}{self.cfg.symbol_code} "
-            f"ACK {'ON' if self.ack_enabled else 'OFF'}"
-        )
-        self.stdscr.addstr(0, 0, status[:width - 1], self._status_attr)
+        # Header line with station info.  Labels are drawn in cyan followed
+        # by a colon, values in plain white, so units and values remain
+        # visually distinct.
+        status_fields = [
+            ("CALL", self.cfg.callsign),
+            ("TOCALL", self.cfg.tocall),
+            ("PATH", ','.join(self.cfg.path) if self.cfg.path else 'NONE'),
+            ("LAT", f"{self.cfg.latitude:.4f}"),
+            ("LON", f"{self.cfg.longitude:.4f}"),
+            ("SYM", f"{self.cfg.symbol_table}{self.cfg.symbol_code}"),
+            ("ACK", 'ON' if self.ack_enabled else 'OFF'),
+        ]
+        x = 0
+        max_x = width - 1
+        for label, value in status_fields:
+            for text, attr in ((f"{label}: ", self._status_attr),
+                               (f"{value}  ", self._status_value_attr)):
+                if x >= max_x:
+                    break
+                seg = text[:max_x - x]
+                self.stdscr.addstr(0, x, seg, attr)
+                x += len(seg)
         # Commands line.  Include commands for clearing messages and the heard list,
         # toggling acknowledgements, and resending the last message.
         # Build the command bar dynamically so that the quick message labels
@@ -992,13 +1017,13 @@ class APRSTUI:
         # heard lists occupy up to rows 3..(N-3).
         msgs_height = height - 5
         msgs_width = width - 20
-        # Draw messages box
-        self.stdscr.addstr(2, 0, "Received packets:", self._title_attr)
-        # Show last messages
+        # Show last messages (transmitted packets in red, received in green)
         packets_fit = max(1, msgs_height // 3)
         displayed = self.messages[-packets_fit:]
         for i, msg in enumerate(displayed):
-            ts, src, dest, info, path = msg
+            ts, src, dest, info, path, is_tx = msg
+            pkt_header_attr = (self._tx_attr if is_tx else self._rx_attr) | curses.A_BOLD
+            pkt_body_attr = self._tx_attr if is_tx else self._rx_attr
             timestr = time.strftime("%H:%M:%S", time.localtime(ts))
             # Decode info as latin1 to preserve arbitrary bytes
             try:
@@ -1052,13 +1077,13 @@ class APRSTUI:
             idx = self._find_exact_callsign(header_tr.upper(), cs) if cs else -1
             if idx >= 0:
                 if idx > 0:
-                    self.stdscr.addstr(row_pos, 0, header_tr[:idx], self._pkt_header_attr)
+                    self.stdscr.addstr(row_pos, 0, header_tr[:idx], pkt_header_attr)
                 cs_end = min(idx + len(cs), len(header_tr))
                 self.stdscr.addstr(row_pos, idx, header_tr[idx:cs_end], self._highlight_attr)
                 if cs_end < len(header_tr):
-                    self.stdscr.addstr(row_pos, cs_end, header_tr[cs_end:], self._pkt_header_attr)
+                    self.stdscr.addstr(row_pos, cs_end, header_tr[cs_end:], pkt_header_attr)
             else:
-                self.stdscr.addstr(row_pos, 0, header_tr, self._pkt_header_attr)
+                self.stdscr.addstr(row_pos, 0, header_tr, pkt_header_attr)
             # Body and blank separator
             # Highlight our callsign if it appears anywhere in the body.  This
             # allows quick identification of replies addressed to us.  Search
@@ -1073,15 +1098,15 @@ class APRSTUI:
             if idx_body >= 0:
                 # Print portion before our callsign
                 if idx_body > 0:
-                    self.stdscr.addstr(row_pos + 1, 0, body_tr[:idx_body], self._pkt_body_attr)
+                    self.stdscr.addstr(row_pos + 1, 0, body_tr[:idx_body], pkt_body_attr)
                 # Highlight the callsign
                 cs_end = min(idx_body + len(cs), len(body_tr))
                 self.stdscr.addstr(row_pos + 1, idx_body, body_tr[idx_body:cs_end], self._highlight_attr)
                 # Print remainder after the callsign, if any
                 if cs_end < len(body_tr):
-                    self.stdscr.addstr(row_pos + 1, cs_end, body_tr[cs_end:], self._pkt_body_attr)
+                    self.stdscr.addstr(row_pos + 1, cs_end, body_tr[cs_end:], pkt_body_attr)
             else:
-                self.stdscr.addstr(row_pos + 1, 0, body_tr, self._pkt_body_attr)
+                self.stdscr.addstr(row_pos + 1, 0, body_tr, pkt_body_attr)
             # row_pos + 2 left intentionally blank
         # Draw heard stations.  Reserve the bottom line for prompts by limiting
         # the height of the list to match the messages area.  Without this
@@ -1140,7 +1165,7 @@ class APRSTUI:
                 # Format ::CALLSIGN:ackNNN
                 if len(payload) >= 13 and payload[10:13] == 'ack':
                     # ack for our message ID; just display
-                    self.messages.append((ts, src, dest, info, path))
+                    self.messages.append((ts, src, dest, info, path, False))
                     continue
                     self._log_message(ts, src, dest, info, path)
 
@@ -1163,7 +1188,7 @@ class APRSTUI:
                     info = decoded.encode('latin1', 'replace')
 
             # Save message; display the path exactly as provided by the TNC
-            self.messages.append((ts, src, dest, info, path))
+            self.messages.append((ts, src, dest, info, path, False))
             self._log_message(ts, src, dest, info, path)
 
     # Prompt user for a string input
@@ -1320,7 +1345,7 @@ class APRSTUI:
             # Mark our path so that the last digipeater is displayed with '*'
             # Display the configured path as is without marking the last hop.
             path_disp = list(self.cfg.path)
-            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp, True))
             self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
             # Store last message for possible retransmission.  msg_id may be None
             # when acknowledgements are disabled.
@@ -1349,7 +1374,7 @@ class APRSTUI:
         # Mark path for display
         # Display the configured path as is without marking the last hop
         path_disp = list(self.cfg.path)
-        self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+        self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp, True))
         self._log_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
 
     # Edit configuration interactively
@@ -1571,7 +1596,7 @@ class APRSTUI:
         # Log retransmitted message in the UI
         # Use the configured path as is for display
         path_disp = list(self.cfg.path)
-        self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+        self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp, True))
         self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
 
     def compose_raw_data(self) -> None:
@@ -1608,7 +1633,7 @@ class APRSTUI:
             # clarifies which software identifier was used.
             # Display the configured path as is
             path_disp = list(self.cfg.path)
-            self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+            self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp, True))
             self._log_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
             # Remember this raw payload for potential retransmission
             self.last_raw = text
@@ -1640,7 +1665,7 @@ class APRSTUI:
         # Display the TOCALL as the destination in the UI for raw repeats
         # Display the configured path as is
         path_disp = list(self.cfg.path)
-        self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp))
+        self.messages.append((ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp, True))
         self._log_message(ts, self.cfg.callsign, self.cfg.tocall, payload, path_disp)
 
     def _send_quick_message(self, quick_text: str) -> None:
@@ -1677,7 +1702,7 @@ class APRSTUI:
             self.tnc.send_frame(ax25)
             ts = time.time()
             path_disp = list(self.cfg.path)
-            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp))
+            self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp, True))
             self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
             # Update last_message record for potential repeat
             self.last_message = (dest, quick_text, msg_id)

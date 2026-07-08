@@ -1,14 +1,13 @@
-# PyttiAPRS — APRS TUI over KISS (Direwolf-compatible)
-
+# PyttiAPRS — A lightweight APRS client
+                                                      
 A single-file, dependency-free terminal UI for making APRS AX.25 contacts through any KISS-compatible TNC (e.g. Direwolf over TCP). It composes APRS **messages**, sends **position beacons**, and shows a live packet log alongside a **heard stations** panel.
 
-- Script filename in this repo: `PyttiAPRS.py`
 - Full walkthrough: see `user_guide_en.md`
 - Telegram user group: https://t.me/pyttiaprs
 
 ---
 
-## Highlights
+## Highlights of the software
 
 - **Self-contained KISS I/O**
   Native KISS framing/unframing (FEND/FESC escaping) and AX.25 UI frame encode/decode. No external packages needed.

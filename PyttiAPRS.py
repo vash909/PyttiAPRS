@@ -14,177 +14,191 @@ import threading
 import time
 import queue
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import json
 import re
 import math
+
+
+# Default APRS application identity.  APZ identifiers are reserved for
+# development.  Operators may change the TOCALL in the configuration, for
+# example when testing an allocated identifier or a compatible destination.
+APP_TOCALL = 'APZ001'
+
+# Protocol defaults and limits.  No digipeater path is assumed: satellite
+# aliases and terrestrial WIDEn-N paths evolve and remain user-configurable.
+DEFAULT_PATH: List[str] = []
+MAX_DIGIPEATERS = 8
+MAX_APRS_INFO_BYTES = 256
+MAX_MESSAGE_TEXT_CHARS = 67
+MAX_POSITION_COMMENT_CHARS = 43
+MESSAGE_RETRY_INTERVAL = 60.0
+MAX_MESSAGE_ATTEMPTS = 2
+
+_AX25_ADDRESS_RE = re.compile(r'^[A-Z0-9]{1,6}(?:-(?:[1-9]|1[0-5]))?$')
+_MESSAGE_ID_RE = re.compile(
+    r'^(?=.{1,5}$)[A-Za-z0-9]+(?:}[A-Za-z0-9]*)?$'
+)
+
+
+def _encode_utf8_limited(text: str, max_bytes: int) -> bytes:
+    """Encode UTF-8 without splitting a multi-byte character at the limit."""
+    encoded = text.encode('utf-8')
+    if len(encoded) <= max_bytes:
+        return encoded
+    encoded = encoded[:max_bytes]
+    while encoded:
+        try:
+            encoded.decode('utf-8')
+            return encoded
+        except UnicodeDecodeError:
+            encoded = encoded[:-1]
+    return b''
+
+
+def decode_aprs_text(data: bytes) -> str:
+    """Decode modern APRS free text, retaining legacy bytes as a fallback."""
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        return data.decode('latin1')
+
+
+def normalize_ax25_address(value: str, field_name: str = 'AX.25 address') -> str:
+    """Return a validated upper-case AX.25 callsign/alias with optional SSID."""
+    if not isinstance(value, str):
+        raise TypeError(f'{field_name} must be text')
+    normalized = value.strip().upper()
+    if not _AX25_ADDRESS_RE.fullmatch(normalized):
+        raise ValueError(
+            f"{field_name} must be 1-6 upper-case letters/digits with optional SSID 1-15"
+        )
+    return normalized
+
+
+def normalize_path(path: List[str]) -> List[str]:
+    """Validate an outgoing AX.25 digipeater path."""
+    if not isinstance(path, list):
+        raise TypeError('Digipeater path must be a list')
+    if len(path) > MAX_DIGIPEATERS:
+        raise ValueError(f'AX.25 permits at most {MAX_DIGIPEATERS} digipeaters')
+    return [normalize_ax25_address(item, 'Digipeater') for item in path]
 
 ###############################################################################
 #                           Mic‑E decoding routine                             #
 ###############################################################################
 
 def decode_mic_e(dest: str, info: bytes) -> Optional[str]:
+    """Decode a Mic-E report to an equivalent readable position string.
 
-    # Mic‑E packets use a data type identifier of apostrophe (0x27) or
-    # backtick (0x60).  Reject anything else.
-    if not info or info[0] not in (0x27, 0x60):
+    The conversion is for display only; the original packet remains the
+    authoritative representation.  Position ambiguity is retained rather
+    than replaced with zeroes.
+    """
+    if not info or info[0] not in (0x27, 0x60) or len(info) < 9:
         return None
-    # The Mic‑E information field must contain at least eight further bytes
-    # after the type identifier to hold longitude, speed/course and symbol.
-    if len(info) < 9:
-        return None
-    # Extract the destination callsign (strip SSID) and normalise to six
-    # uppercase characters.  Mic‑E encodes data into exactly six characters.
+
     destcall = dest.split('-', 1)[0].upper()
-    if len(destcall) < 6:
+    if len(destcall) != 6:
         return None
-    destcall = destcall[:6]
-    # Define per‑character decoding to extract latitude digit and flags.
-    # See Section 10 of the APRS v1.0 protocol specification for the
-    # mapping.  Each of the six bytes encodes a latitude digit plus one
-    # additional flag bit indicating N/S, longitude offset or E/W.
+
     lat_digits: List[str] = []
-    ns_indicator: Optional[str] = None  # 'N' or 'S'
-    lon_offset = 0  # 0 or 100 degrees
-    we_indicator: Optional[str] = None  # 'E' or 'W'
+    ns_indicator = 'S'
+    lon_offset = 0
+    we_indicator = 'E'
     for idx, ch in enumerate(destcall):
         if '0' <= ch <= '9':
-            # Numeric digits map directly; message bits are zero.
-            lat_digit = ch
-            flag_ns = 'S'
-            flag_offset = 0
-            flag_we = 'E'
+            digit, high = ch, False
         elif 'A' <= ch <= 'J':
-            # A–J map to 0–9 and indicate custom message type.
-            # ord('A')=65 -> 65-17=48 ('0'), ord('J')=74 ->57 ('9').
-            lat_digit = chr(ord(ch) - 17)
-            flag_ns = 'S'
-            flag_offset = 0
-            flag_we = 'E'
-        elif ch in ('K', 'L'):
-            # K or L represent a space (ambiguous digit) and custom message.
-            lat_digit = ' '
-            flag_ns = 'S'
-            flag_offset = 0
-            flag_we = 'E'
+            digit, high = chr(ord(ch) - 17), True
+        elif ch == 'K':
+            digit, high = ' ', True
+        elif ch == 'L':
+            digit, high = ' ', False
         elif 'P' <= ch <= 'Y':
-            # P–Y map to 0–9 and indicate standard message, north and west
-            lat_digit = chr(ord(ch) - 32)
-            flag_ns = 'N'
-            flag_offset = 100
-            flag_we = 'W'
+            digit, high = chr(ord(ch) - 32), True
         elif ch == 'Z':
-            # Z represents a space (ambiguous digit) and standard message.
-            lat_digit = ' '
-            flag_ns = 'N'
-            flag_offset = 100
-            flag_we = 'W'
+            digit, high = ' ', True
         else:
-            # Unknown character – not Mic‑E
             return None
-        lat_digits.append(lat_digit)
-        # Assign indicators based on character position
+
+        # A-K encode Mic-E message bits and are not valid in bytes 4-6.
+        if idx >= 3 and ('A' <= ch <= 'K'):
+            return None
+        lat_digits.append(digit)
         if idx == 3:
-            ns_indicator = flag_ns
+            ns_indicator = 'N' if high else 'S'
         elif idx == 4:
-            lon_offset = flag_offset
+            lon_offset = 100 if high else 0
         elif idx == 5:
-            we_indicator = flag_we
-    # Ensure indicators are set
-    if ns_indicator is None:
-        ns_indicator = 'N'
-    if we_indicator is None:
-        we_indicator = 'E'
-    # Replace ambiguous digits (spaces) with '0' for numeric conversion.
-    lat_digits_str = ''.join(ch if ch.isdigit() else '0' for ch in lat_digits)
-    # Compute latitude degrees and minutes.  The first two digits are degrees,
-    # the next two digits are minutes and the last two are hundredths of
-    # minutes.  Convert to decimal degrees.
-    try:
-        lat_deg = int(lat_digits_str[0:2])
-        lat_min = int(lat_digits_str[2:4])
-        lat_hun = int(lat_digits_str[4:6])
-    except Exception:
+            we_indicator = 'W' if high else 'E'
+
+    ambiguity = 0
+    for digit in reversed(lat_digits):
+        if digit == ' ':
+            ambiguity += 1
+        else:
+            break
+    if any(digit == ' ' for digit in lat_digits[:6 - ambiguity]):
         return None
-    lat_val = lat_deg + (lat_min + lat_hun / 100.0) / 60.0
-    if ns_indicator == 'S':
-        lat_val = -lat_val
-    # Extract the Mic‑E encoded data bytes from the information field.  The
-    # first byte (index 0) is the type identifier, so longitude begins at
-    # index 1.  The order is: d+28, m+28, h+28, SP+28, DC+28, SE+28,
-    # symbol code, symbol table.
-    dplus = info[1]
-    mplus = info[2]
-    hplus = info[3]
-    spplus = info[4]
-    dcplus = info[5]
-    seplus = info[6]
-    # Decode longitude degrees and minutes.  Per spec, subtract 28 from
-    # each value and adjust for wrap‑arounds.
+    if ambiguity > 4:
+        return None
+
+    dplus, mplus, hplus, spplus, dcplus, seplus = info[1:7]
+    if not (38 <= dplus <= 127):
+        return None
+    if any(value < 28 or value > 127 for value in (mplus, hplus, spplus, dcplus, seplus)):
+        return None
+
     lon_deg = dplus - 28 + lon_offset
+    if 180 <= lon_deg <= 189:
+        lon_deg -= 80
+    elif 190 <= lon_deg <= 199:
+        lon_deg -= 190
+    if not 0 <= lon_deg <= 179:
+        return None
+
     lon_min = mplus - 28
     if lon_min >= 60:
         lon_min -= 60
     lon_hun = hplus - 28
     if lon_hun >= 100:
         lon_hun -= 100
-    lon_val = lon_deg + (lon_min + lon_hun / 100.0) / 60.0
-    # Apply east/west indicator
-    if we_indicator == 'W':
-        lon_val = -lon_val
-    # Decode speed and course.  The specification defines a simple
-    # arithmetic method to extract these values from SP+28, DC+28 and
-    # SE+28 bytes【265601970696074†L4783-L4846】.  See Section 10.10.3.
-    sp_val = spplus - 28
-    dc_val = dcplus - 28
-    se_val = seplus - 28
-    # Speed in tens of knots
-    speed_tens = sp_val * 10
-    # Units of speed and hundreds of degrees of course are packed into
-    # DC+28: divide by 10 to get units of speed, and take the remainder
-    # for the course hundreds.
-    units_speed = dc_val // 10
-    course_hundreds = dc_val % 10
-    speed_knots = speed_tens + units_speed
-    # Wrap speed around if >= 800 knots
+    if not (0 <= lon_min <= 59 and 0 <= lon_hun <= 99):
+        return None
+
+    speed_knots = (spplus - 28) * 10 + (dcplus - 28) // 10
+    course_deg = ((dcplus - 28) % 10) * 100 + (seplus - 28)
     if speed_knots >= 800:
         speed_knots -= 800
-    # Course tens and units come directly from SE+28 plus the hundreds
-    # derived above.  Combine to form the full course.
-    course_deg = (course_hundreds * 100) + se_val
-    # Wrap course around if >= 400 degrees (per spec)
     if course_deg >= 400:
         course_deg -= 400
-    # Symbol code and table: positions 7 and 8 after the type byte.
-    try:
-        symbol_code = chr(info[7])
-    except Exception:
-        symbol_code = '>'
-    try:
-        symbol_table = chr(info[8])
-    except Exception:
-        symbol_table = '/'
-    # Remaining bytes constitute optional telemetry or status/comment.  Decode
-    # them verbatim using latin1, stripping leading/trailing whitespace.
-    comment_bytes = info[9:]
-    try:
-        comment = comment_bytes.decode('latin1').strip()
-    except Exception:
-        comment = ''
-    # Use the existing helper to construct a standard uncompressed position
-    # string.  Append the comment, and also include speed and course as
-    # human‑readable text if available.  Represent speed in knots and
-    # course in degrees for simplicity.  Finally append a {mic-e}
-    # marker so that the UI can identify Mic‑E packets.【265601970696074†L4783-L4846】
-    spd_course_comment = f" cse/spd={course_deg:.0f}/{speed_knots:.0f}kts"
-    full_comment = (spd_course_comment + (' ' + comment if comment else '')).rstrip()
-    payload_bytes = build_aprs_position(lat_val, lon_val, symbol_table, symbol_code, full_comment)
-    try:
-        payload_str = payload_bytes.decode('ascii')
-    except Exception:
+    if not (0 <= speed_knots <= 999 and 0 <= course_deg <= 360):
         return None
-    # Append Mic‑E identifier.  Use curly braces to distinguish.
-    return payload_str + '{mic-e}'
+
+    symbol_code = chr(info[7])
+    symbol_table = chr(info[8])
+    if not (33 <= info[7] <= 126 and 33 <= info[8] <= 126):
+        return None
+
+    lat_field = (
+        ''.join(lat_digits[:2]) + ''.join(lat_digits[2:4]) + '.'
+        + ''.join(lat_digits[4:6]) + ns_indicator
+    )
+    lon_minute_digits = list(f'{lon_min:02d}{lon_hun:02d}')
+    for index in range(4 - ambiguity, 4):
+        if index >= 0:
+            lon_minute_digits[index] = ' '
+    lon_field = (
+        f'{lon_deg:03d}' + ''.join(lon_minute_digits[:2]) + '.'
+        + ''.join(lon_minute_digits[2:]) + we_indicator
+    )
+
+    comment = decode_aprs_text(info[9:]) if len(info) > 9 else ''
+    messaging_capable = bool(comment[:1] in ('`', '>', ']'))
+    dti = '=' if messaging_capable else '!'
+    extension = f'{course_deg:03d}/{speed_knots:03d}'
+    return f'{dti}{lat_field}{symbol_table}{lon_field}{symbol_code}{extension}{comment}'
 
 # Potential locations for the configuration file.  The program will
 # search for a saved configuration in these locations in order and will
@@ -238,7 +252,7 @@ def get_writable_config_path() -> Optional[str]:
 def save_config(cfg: 'StationConfig') -> None:
     """Write the current station configuration to the first writable path.
 
-    Only a subset of fields are persisted (callsign, tocall, path,
+    Only a subset of fields are persisted (callsign, TOCALL, path,
     latitude, longitude, symbol table and code, default position comment,
     host and port).  The message ID counter is not saved because it
     should reset with each run.
@@ -258,7 +272,8 @@ def save_config(cfg: 'StationConfig') -> None:
         'quick_msg2': cfg.quick_msg2,
         'log_file': cfg.log_file,
         # Persist the acknowledgement flag so that the user's preference is
-        # retained across sessions.  When absent, the default remains True.
+        # retained across sessions.  One-shot mode is the default and is
+        # useful on short or otherwise constrained links.
         'ack_enabled': cfg.ack_enabled,
     }
     path = get_writable_config_path()
@@ -275,7 +290,12 @@ def save_config(cfg: 'StationConfig') -> None:
 #                             AX.25/KISS routines                             #
 ###############################################################################
 
-def encode_ax25_address(call: str, ssid: int = 0, last: bool = False) -> bytes:
+def encode_ax25_address(
+    call: str,
+    ssid: int = 0,
+    last: bool = False,
+    command_or_repeated: bool = False,
+) -> bytes:
     """Encode a callsign and SSID into a 7‑byte AX.25 address field.
 
     The callsign is padded to six characters, converted to uppercase and
@@ -283,20 +303,29 @@ def encode_ax25_address(call: str, ssid: int = 0, last: bool = False) -> bytes:
     constructed by shifting the SSID into bits 1–4 of the final byte and
     setting bits 5 and 6 to 1 as required by the AX.25 standard.  Bit 0
     of the final byte is set to 1 for the last address in the header and
-    left at 0 otherwise【287604055694888†L1110-L1154】.
+    left at 0 otherwise.
 
-    :param call: Callsign (without SSID suffix).  Will be truncated or
-        padded to six characters.
+    :param call: Callsign (without SSID suffix).  It is padded to six
+        characters after validation.
     :param ssid: SSID number (0–15).
     :param last: Whether this address is the last in the address list.
+    :param command_or_repeated: Set the C bit for destination/source fields,
+        or the H bit for a digipeater address.
     :return: Seven bytes representing the AX.25 address.
     """
-    call = (call.upper()[:6]).ljust(6)
+    call = call.strip().upper()
+    if not re.fullmatch(r'[A-Z0-9]{1,6}', call):
+        raise ValueError('AX.25 callsign must contain 1-6 upper-case letters/digits')
+    if not 0 <= ssid <= 15:
+        raise ValueError('AX.25 SSID must be between 0 and 15')
+    call = call.ljust(6)
     encoded = bytearray()
     for ch in call:
         encoded.append((ord(ch) << 1) & 0xFE)
     # Construct SSID/control byte
-    ssid_byte = ((ssid & 0x0F) << 1) | 0x60  # place SSID in bits 1–4, set bits 5–6
+    ssid_byte = (ssid << 1) | 0x60
+    if command_or_repeated:
+        ssid_byte |= 0x80
     if last:
         ssid_byte |= 0x01  # set bit0 if this is the last address
     encoded.append(ssid_byte)
@@ -308,7 +337,7 @@ def decode_ax25_address(addr: bytes) -> Tuple[str, int, bool]:
 
     The inverse of :func:`encode_ax25_address`.  Callsign characters are
     obtained by shifting each byte right by one bit.  The SSID is read
-    from bits 1–4 of the final byte and the last flag from bit 0.【287604055694888†L1110-L1154】
+    from bits 1–4 of the final byte and the last flag from bit 0.
 
     :param addr: Seven bytes representing an AX.25 address field.
     :return: (callsign, ssid, last)
@@ -327,10 +356,11 @@ def encode_ax25_frame(dest: str, source: str, path: List[str], info: bytes) -> b
     All addresses must include the SSID suffix separated by a dash (e.g.
     ``N0CALL-9``).  The destination field typically contains the so‑called
     ``tocall`` identifying the sending software.  The path is a list of
-    digipeaters to include between source and destination (e.g.
-    ["ARISS","RELAY"], etc).  This function encodes the addresses
-    sequentially and appends the standard UI control (0x03) and PID
-    (0xF0) fields before the information payload.
+    digipeaters to include between source and destination (for example
+    ``["RS0ISS"]`` or ``["WIDE1-1", "WIDE2-2"]``).  No alias receives
+    special treatment.  This function encodes the addresses sequentially
+    and appends the standard UI control (0x03) and PID (0xF0) fields before
+    the information payload.
 
     :param dest: Destination callsign with optional SSID (e.g. ``APZ001``).
     :param source: Source callsign with optional SSID (e.g. ``IK2ABC-7``).
@@ -338,31 +368,44 @@ def encode_ax25_frame(dest: str, source: str, path: List[str], info: bytes) -> b
     :param info: Information field (payload) as bytes.
     :return: Raw AX.25 frame (without flags or FCS) ready for KISS encoding.
     """
+    if not isinstance(info, bytes):
+        raise TypeError('AX.25 information field must be bytes')
+    if not 1 <= len(info) <= MAX_APRS_INFO_BYTES:
+        raise ValueError(
+            f'APRS information field must be 1-{MAX_APRS_INFO_BYTES} bytes'
+        )
+    dest = normalize_ax25_address(dest, 'Destination')
+    source = normalize_ax25_address(source, 'Source')
+    path = normalize_path(path)
+
     # Helper to split callsign and SSID
     def split_call(c: str) -> Tuple[str, int]:
         if '-' in c:
             cs, ss = c.split('-', 1)
-            try:
-                return cs, int(ss)
-            except ValueError:
-                return cs, 0
+            return cs, int(ss)
         return c, 0
 
     # Encode addresses
     addresses = []
     # Destination (not last unless no other addresses)
     dest_call, dest_ssid = split_call(dest)
-    addresses.append(encode_ax25_address(dest_call, dest_ssid, last=False))
+    addresses.append(encode_ax25_address(
+        dest_call, dest_ssid, last=False, command_or_repeated=True
+    ))
     # Source (last if there is no path)
     src_call, src_ssid = split_call(source)
     last_flag = len(path) == 0
-    addresses.append(encode_ax25_address(src_call, src_ssid, last=last_flag))
+    addresses.append(encode_ax25_address(
+        src_call, src_ssid, last=last_flag, command_or_repeated=False
+    ))
     # Path (all but last flagged false, last flagged true)
     if path:
         for i, dig in enumerate(path):
             dig_call, dig_ssid = split_call(dig)
             is_last = i == (len(path) - 1)
-            addresses.append(encode_ax25_address(dig_call, dig_ssid, last=is_last))
+            addresses.append(encode_ax25_address(
+                dig_call, dig_ssid, last=is_last, command_or_repeated=False
+            ))
 
     frame = b''.join(addresses)
     # Append UI control field (0x03) and no‑layer3 PID (0xF0) then info
@@ -397,18 +440,22 @@ def decode_ax25_frame(frame: bytes) -> Optional[Tuple[str, str, List[str], bytes
     # Extract address fields.  Stop when the E (extension) bit (bit 0)
     # is set, indicating the last address.  Each address is seven
     # bytes: 6 shifted characters + SSID byte.
-    while not last_found and idx + 7 <= len(frame):
+    while not last_found and idx + 7 <= len(frame) and len(addresses) < 10:
         addr_bytes = frame[idx:idx + 7]
+        if any(byte & 0x01 for byte in addr_bytes[:6]):
+            return None
         # Decode callsign by shifting right by one bit and stripping
         call = ''.join(chr((b >> 1) & 0x7F) for b in addr_bytes[:6]).strip()
+        if not re.fullmatch(r'[A-Z0-9]{1,6}', call):
+            return None
         ssid = (addr_bytes[6] >> 1) & 0x0F
         h_bit = bool(addr_bytes[6] & 0x80)
         e_bit = bool(addr_bytes[6] & 0x01)
         addresses.append((call, ssid, h_bit, e_bit))
         last_found = e_bit
         idx += 7
-    # Need at least destination and source
-    if len(addresses) < 2:
+    # Need destination, source, an E bit, and no more than 8 digipeaters.
+    if len(addresses) < 2 or not last_found:
         return None
     # Convert destination and source to strings
     dest_call, dest_ssid, _, _ = addresses[0]
@@ -431,6 +478,8 @@ def decode_ax25_frame(frame: bytes) -> Optional[Tuple[str, str, List[str], bytes
     if control != 0x03 or pid != 0xF0:
         return None
     info = frame[idx + 2:]
+    if not 1 <= len(info) <= MAX_APRS_INFO_BYTES:
+        return None
     return dest, source, path, info
 
 
@@ -440,7 +489,7 @@ def kiss_encode(ax25_frame: bytes) -> bytes:
     A KISS data frame is constructed by wrapping the payload with FEND
     (0xC0) bytes and prefixing it with a data frame type (0x00).  Any
     occurrence of FEND (0xC0) or FESC (0xDB) in the payload is
-    escaped according to the KISS protocol【677775699448989†L41-L46】.
+    escaped according to the KISS protocol.
 
     :param ax25_frame: Raw AX.25 frame (without flags or FCS).
     :return: KISS‑encoded bytes ready to be sent on the wire.
@@ -468,8 +517,8 @@ def kiss_unframe(stream: bytes) -> Tuple[List[bytes], bytes]:
 
     This helper scans ``stream`` for 0xC0 delimiters and returns a list
     of decoded AX.25 frames (with escape sequences removed) as well as
-    any trailing bytes that constitute an incomplete frame.  Only data
-    frames (type 0x00) are returned; other command frames are ignored.
+    any trailing bytes that constitute an incomplete frame.  Data frames
+    from every KISS port are returned; non-data commands are ignored.
 
     :param stream: Byte stream containing zero or more KISS frames.
     :return: (list of AX.25 frames, remainder)
@@ -478,58 +527,87 @@ def kiss_unframe(stream: bytes) -> Tuple[List[bytes], bytes]:
     FESC = 0xDB
     TFEND = 0xDC
     TFESC = 0xDD
-    frames = []
-    current = None
-    i = 0
-    while i < len(stream):
-        b = stream[i]
-        if b == FEND:
-            if current is not None:
-                # End of current frame
-                if len(current) >= 1:
-                    cmd = current[0]
-                    data = current[1:]
-                    if cmd == 0x00:
-                        frames.append(bytes(data))
-                current = None
-            else:
-                # Start of new frame
-                current = bytearray()
-            i += 1
+    frames: List[bytes] = []
+    start = stream.find(bytes([FEND]))
+    if start < 0:
+        return frames, b''
+
+    while True:
+        end = stream.find(bytes([FEND]), start + 1)
+        if end < 0:
+            # Keep the opening delimiter so a frame split across TCP reads can
+            # be parsed when the next chunk arrives.
+            return frames, stream[start:]
+
+        encoded = stream[start + 1:end]
+        start = end
+        if not encoded:
             continue
-        if current is None:
-            # Data outside of a frame – ignore
-            i += 1
-            continue
-        # Handle escape sequences
-        if b == FESC:
-            if i + 1 < len(stream):
-                next_b = stream[i + 1]
-                if next_b == TFEND:
-                    current.append(FEND)
-                elif next_b == TFESC:
-                    current.append(FESC)
-                else:
-                    # Invalid escape; skip
-                    pass
-                i += 2
+
+        decoded = bytearray()
+        valid = True
+        i = 0
+        while i < len(encoded):
+            byte = encoded[i]
+            if byte != FESC:
+                decoded.append(byte)
+                i += 1
                 continue
-        current.append(b)
-        i += 1
-    remainder = bytes(current) if current else b''
-    return frames, remainder
+            if i + 1 >= len(encoded):
+                valid = False
+                break
+            escaped = encoded[i + 1]
+            if escaped == TFEND:
+                decoded.append(FEND)
+            elif escaped == TFESC:
+                decoded.append(FESC)
+            else:
+                valid = False
+                break
+            i += 2
+
+        if valid and decoded:
+            command = decoded[0]
+            # The low nibble is the KISS command; accept data frames from any
+            # KISS port rather than only port zero.
+            if command & 0x0F == 0:
+                frames.append(bytes(decoded[1:]))
 
 
 ###############################################################################
 #                            APRS payload routines                            #
 ###############################################################################
 
-def build_aprs_message(addressee: str, text: str, msg_id: Optional[int] = None) -> bytes:
+@dataclass(frozen=True)
+class ParsedAPRSMessage:
+    addressee: str
+    text: str
+    msg_id: Optional[str]
+    response: Optional[str] = None
+
+
+def _format_message_id(msg_id: Union[int, str]) -> str:
+    if isinstance(msg_id, int):
+        formatted = f'{msg_id % 1000:03d}'
+    else:
+        formatted = str(msg_id)
+    if not _MESSAGE_ID_RE.fullmatch(formatted):
+        raise ValueError(
+            'APRS message ID must be 1-5 characters: alphanumerics with an '
+            'optional reply-ack separator'
+        )
+    return formatted
+
+
+def build_aprs_message(
+    addressee: str,
+    text: str,
+    msg_id: Optional[Union[int, str]] = None,
+) -> bytes:
     """Construct an APRS message payload.
 
-    The addressee must be padded to exactly nine characters as required
-    by the APRS specification【287604055694888†L1110-L1154】.  The message text should
-    not exceed 67 characters; if it does, it will be truncated.  When
+    The addressee is padded to exactly nine characters.  Message text may
+    not exceed 67 characters; longer input is truncated.  When
     ``msg_id`` is provided it is appended with a leading ``{`` so that
     the receiving station can acknowledge the message.
 
@@ -539,13 +617,64 @@ def build_aprs_message(addressee: str, text: str, msg_id: Optional[int] = None) 
     :return: Bytes of the information field ready to be inserted into
         the AX.25 frame.
     """
-    addressee = addressee.upper()[:9].ljust(9)
-    text = text[:67]
-    info = f':{addressee}:{text}'
+    if not isinstance(addressee, str) or not isinstance(text, str):
+        raise TypeError('APRS message addressee and text must be strings')
+    addressee = addressee.strip().upper()
+    if not re.fullmatch(r'[A-Z0-9-]{1,9}', addressee):
+        raise ValueError('APRS message addressee must be 1-9 letters, digits, or hyphens')
+    if '{' in text:
+        raise ValueError("APRS message text cannot contain '{'")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise ValueError('APRS message text cannot contain control characters')
+
+    header = f':{addressee.ljust(9)}:'.encode('ascii')
+    suffix = b''
     if msg_id is not None:
-        # Append message ID with {, zero‑pad to 3 digits as per example
-        info += '{%03d' % (msg_id % 1000)
-    return info.encode('ascii')
+        suffix = b'{' + _format_message_id(msg_id).encode('ascii')
+    # APRS limits message text to 67 characters.  UTF-8 can use multiple
+    # octets per character, so also respect the 256-octet AX.25 information
+    # field without splitting a code point.
+    text = text[:MAX_MESSAGE_TEXT_CHARS]
+    available = MAX_APRS_INFO_BYTES - len(header) - len(suffix)
+    text_bytes = _encode_utf8_limited(text, available)
+    return header + text_bytes + suffix
+
+
+def build_aprs_ack(addressee: str, msg_id: str, rejected: bool = False) -> bytes:
+    """Build an APRS acknowledgement or rejection message."""
+    response = ('rej' if rejected else 'ack') + _format_message_id(msg_id)
+    return build_aprs_message(addressee, response)
+
+
+def parse_aprs_message(info: bytes) -> Optional[ParsedAPRSMessage]:
+    """Parse APRS messages, including ack/rej and reply-ack identifiers."""
+    if len(info) < 11 or info[:1] != b':' or info[10:11] != b':':
+        return None
+    try:
+        addressee = info[1:10].decode('ascii').rstrip()
+    except UnicodeDecodeError:
+        return None
+    body = decode_aprs_text(info[11:])
+
+    for response in ('ack', 'rej'):
+        if body.startswith(response):
+            candidate = body[len(response):]
+            if _MESSAGE_ID_RE.fullmatch(candidate):
+                return ParsedAPRSMessage(
+                    addressee=addressee,
+                    text='',
+                    msg_id=candidate,
+                    response=response,
+                )
+
+    msg_id: Optional[str] = None
+    text = body
+    if '{' in body:
+        text, candidate = body.split('{', 1)
+        if not _MESSAGE_ID_RE.fullmatch(candidate):
+            return None
+        msg_id = candidate
+    return ParsedAPRSMessage(addressee, text, msg_id)
 
 
 def build_aprs_position(
@@ -553,48 +682,61 @@ def build_aprs_position(
     longitude: float,
     symbol_table: str = '/',
     symbol_code: str = '>',
-    comment: str = ''
+    comment: str = '',
+    messaging_capable: bool = True,
 ) -> bytes:
     """Construct an uncompressed APRS position payload.
 
-    The uncompressed position format uses a leading ``!`` character,
-    followed by latitude and longitude in degrees/minutes and two
-    symbols identifying the station【916318889271047†L48-L61】.  An optional
-    free‑form comment may follow the symbol code and will appear in
-    APRS clients as text.  The latitude is formatted as DDMM.mmN/S and
-    longitude as DDDMM.mmE/W.  The symbol table and symbol code
-    determine the map symbol shown by APRS clients.  See the APRS
-    specification for valid values.
+    The uncompressed position format uses ``=`` for a messaging-capable
+    station by default, followed by latitude and longitude in degrees/minutes
+    and two symbol characters.  An optional free-form comment may follow the
+    symbol code.  Latitude is formatted as DDMM.mmN/S and longitude as
+    DDDMM.mmE/W.
 
     :param latitude: Latitude in decimal degrees (positive north,
         negative south).
     :param longitude: Longitude in decimal degrees (positive east,
         negative west).
-    :param symbol_table: Symbol table identifier (``'/'`` or ``'\'``).
+    :param symbol_table: Primary/alternate table identifier or overlay.
     :param symbol_code: Symbol code (e.g. ``'>'`` for a car, ``'^'`` for
         a house).
     :param comment: Optional comment text to append after the symbol.
+    :param messaging_capable: Use ``=`` when true, otherwise ``!``.
     :return: Bytes of the information field ready to be inserted into
         the AX.25 frame.
     """
-    # Convert latitude to degrees/minutes
-    lat_abs = abs(latitude)
-    lat_deg = int(lat_abs)
-    lat_min = (lat_abs - lat_deg) * 60
-    lat_dir = 'N' if latitude >= 0 else 'S'
-    # Convert longitude to degrees/minutes
-    lon_abs = abs(longitude)
-    lon_deg = int(lon_abs)
-    lon_min = (lon_abs - lon_deg) * 60
-    lon_dir = 'E' if longitude >= 0 else 'W'
-    lat_str = f"{lat_deg:02d}{lat_min:05.2f}{lat_dir}"
-    lon_str = f"{lon_deg:03d}{lon_min:05.2f}{lon_dir}"
-    # Assemble position string
-    base = f'!{lat_str}{symbol_table}{lon_str}{symbol_code}'
-    # Append optional comment if provided
-    if comment:
-        base += comment
-    return base.encode('ascii')
+    if not isinstance(comment, str):
+        raise TypeError('Position comment must be text')
+    if not (math.isfinite(latitude) and math.isfinite(longitude)):
+        raise ValueError('Position coordinates must be finite')
+    if not -90 <= latitude <= 90:
+        raise ValueError('Latitude must be between -90 and 90 degrees')
+    if not -180 <= longitude <= 180:
+        raise ValueError('Longitude must be between -180 and 180 degrees')
+    if len(symbol_table) != 1 or symbol_table not in '/\\0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+        raise ValueError('Invalid APRS symbol table/overlay')
+    if len(symbol_code) != 1 or not 33 <= ord(symbol_code) <= 126:
+        raise ValueError('APRS symbol code must be one printable ASCII character')
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in comment):
+        raise ValueError('Position comment cannot contain control characters')
+
+    def coordinate_parts(value: float, max_degrees: int) -> Tuple[int, int, int]:
+        total_hundredths = int(math.floor(abs(value) * 6000 + 0.5))
+        degrees, minute_hundredths = divmod(total_hundredths, 6000)
+        minutes, hundredths = divmod(minute_hundredths, 100)
+        if degrees > max_degrees or (degrees == max_degrees and minutes):
+            raise ValueError('Rounded coordinate is outside the valid APRS range')
+        return degrees, minutes, hundredths
+
+    lat_deg, lat_min, lat_hun = coordinate_parts(latitude, 90)
+    lon_deg, lon_min, lon_hun = coordinate_parts(longitude, 180)
+    lat_dir = 'S' if math.copysign(1.0, latitude) < 0 else 'N'
+    lon_dir = 'W' if math.copysign(1.0, longitude) < 0 else 'E'
+    lat_str = f'{lat_deg:02d}{lat_min:02d}.{lat_hun:02d}{lat_dir}'
+    lon_str = f'{lon_deg:03d}{lon_min:02d}.{lon_hun:02d}{lon_dir}'
+    dti = '=' if messaging_capable else '!'
+    base = f'{dti}{lat_str}{symbol_table}{lon_str}{symbol_code}'.encode('ascii')
+    return base + comment[:MAX_POSITION_COMMENT_CHARS].encode('utf-8')
 
 
 ###############################################################################
@@ -691,8 +833,8 @@ class TNCConnection:
 class StationConfig:
     """Configuration parameters for the station."""
     callsign: str  # e.g. "IK2ABC-7"
-    tocall: str    # software identifier, e.g. "APZ001"
-    path: List[str] = field(default_factory=lambda: [])
+    tocall: str = APP_TOCALL
+    path: List[str] = field(default_factory=list)
     latitude: float = 0.0
     longitude: float = 0.0
     symbol_table: str = '/'
@@ -708,7 +850,7 @@ class StationConfig:
     # When set to False, the application will omit the message ID when
     # composing messages.  The value may be toggled at runtime via the
     # 'a' command and is persisted in the configuration file.
-    ack_enabled: bool = True
+    ack_enabled: bool = False
 
     def next_msg_id(self) -> int:
         mid = self.msg_id_counter
@@ -717,6 +859,16 @@ class StationConfig:
         if self.msg_id_counter > 999:
             self.msg_id_counter = 1
         return mid
+
+
+@dataclass
+class PendingMessage:
+    destination: str
+    text: str
+    msg_id: str
+    payload: bytes
+    last_sent: float
+    attempts: int = 1
 
 
 class APRSTUI:
@@ -775,16 +927,18 @@ class APRSTUI:
             self._tx_attr = curses.A_BOLD
             self._rx_attr = curses.A_NORMAL
 
-        # Track whether acknowledgements (message IDs) are appended to outgoing
-        # messages.  APRS over satellites may not support ACKs, so this can
-        # be toggled at runtime via the 'a' key.  Initialise from the
-        # configuration so that the setting persists across sessions.
-        self.ack_enabled: bool = getattr(cfg, 'ack_enabled', True)
+        # One-shot messages omit IDs by default.  When enabled, IDs request an
+        # end-to-end acknowledgement from the addressed station; digipeaters,
+        # whether terrestrial or in space, only relay the UI frame.
+        self.ack_enabled: bool = getattr(cfg, 'ack_enabled', False)
         # Remember the most recently sent message so that it can be
         # retransmitted (for example if a digipeater did not repeat it).
         # Stored as a tuple (destination, text, msg_id).  msg_id may be None
         # if acknowledgements are disabled when the message was sent.
-        self.last_message: Optional[Tuple[str, str, Optional[int]]] = None
+        self.last_message: Optional[Tuple[str, str, Optional[str]]] = None
+        self.pending_messages: Dict[str, PendingMessage] = {}
+        self.sent_ack_times: Dict[Tuple[str, str], float] = {}
+        self.last_delivery_status: str = 'ONE-SHOT'
         # Remember the most recently sent raw data packet (a payload without
         # addressee formatting).  Stored as the raw text string.  When
         # repeating, this text is re‑encoded and re‑sent with the same path.
@@ -823,6 +977,7 @@ class APRSTUI:
         while True:
             # Process any incoming frames
             self._process_incoming()
+            self._retry_pending_messages()
             self._draw()
             try:
                 c = self.stdscr.getch()
@@ -915,7 +1070,7 @@ class APRSTUI:
         try:
             timestr = time.strftime('%H:%M:%S', time.localtime(ts))
             try:
-                text = info.decode('latin1') if isinstance(info, (bytes, bytearray)) else str(info)
+                text = decode_aprs_text(bytes(info)) if isinstance(info, (bytes, bytearray)) else str(info)
             except Exception:
                 text = str(info)
             # Sanitize the decoded text to avoid embedded nulls or other
@@ -983,6 +1138,7 @@ class APRSTUI:
             ("LON", f"{self.cfg.longitude:.4f}"),
             ("SYM", f"{self.cfg.symbol_table}{self.cfg.symbol_code}"),
             ("ACK", 'ON' if self.ack_enabled else 'OFF'),
+            ("MSG", self.last_delivery_status),
         ]
         x = 0
         max_x = width - 1
@@ -1025,9 +1181,10 @@ class APRSTUI:
             pkt_header_attr = (self._tx_attr if is_tx else self._rx_attr) | curses.A_BOLD
             pkt_body_attr = self._tx_attr if is_tx else self._rx_attr
             timestr = time.strftime("%H:%M:%S", time.localtime(ts))
-            # Decode info as latin1 to preserve arbitrary bytes
+            # APRS free text is UTF-8; retain a Latin-1 fallback for legacy
+            # or binary-bearing packet types.
             try:
-                text = info.decode('latin1')
+                text = decode_aprs_text(info)
             except Exception:
                 text = str(info)
             # Sanitize the decoded text before displaying it.  Some
@@ -1156,18 +1313,59 @@ class APRSTUI:
                 self.heard_times[src] = float(ts)
             except Exception:
                 self.heard_times[src] = time.time()
-            # Recognise acknowledgements: info starts with ':' and contains ack
-            if info and info.startswith(b':'):
-                try:
-                    payload = info.decode('latin1')
-                except Exception:
-                    payload = ''
-                # Format ::CALLSIGN:ackNNN
-                if len(payload) >= 13 and payload[10:13] == 'ack':
-                    # ack for our message ID; just display
-                    self.messages.append((ts, src, dest, info, path, False))
-                    continue
-                    self._log_message(ts, src, dest, info, path)
+            parsed_message = parse_aprs_message(info)
+            if parsed_message is not None:
+                addressed_to_us = (
+                    parsed_message.addressee.upper() == self.cfg.callsign.upper()
+                )
+                if parsed_message.response and addressed_to_us and parsed_message.msg_id:
+                    response_id = parsed_message.msg_id.split('}', 1)[0]
+                    pending = self._pop_pending_from(response_id, src)
+                    if pending is None:
+                        pending = self._pop_pending_from(parsed_message.msg_id, src)
+                    if pending is not None:
+                        if parsed_message.response == 'ack':
+                            self.last_delivery_status = f'ACK {response_id}'
+                        else:
+                            self.last_delivery_status = f'REJ {response_id}'
+                elif addressed_to_us and parsed_message.msg_id:
+                    _, separator, reply_ack_id = parsed_message.msg_id.partition('}')
+                    if separator and reply_ack_id:
+                        pending = self._pop_pending_from(reply_ack_id, src)
+                        if pending is not None:
+                            self.last_delivery_status = f'ACK {reply_ack_id}'
+                    # Multiple ACKs for the same message must be at least 30
+                    # seconds apart.  This also prevents replying twice when
+                    # both direct and digipeated copies are heard.
+                    ack_key = (src.upper(), parsed_message.msg_id)
+                    last_ack = self.sent_ack_times.get(ack_key)
+                    ack_now = time.time()
+                    if last_ack is None or ack_now - last_ack >= 30.0:
+                        try:
+                            ack_payload = build_aprs_ack(src, parsed_message.msg_id)
+                            ax25 = encode_ax25_frame(
+                                self.cfg.tocall,
+                                self.cfg.callsign,
+                                self.cfg.path,
+                                ack_payload,
+                            )
+                            self.tnc.send_frame(ax25)
+                            ack_ts = time.time()
+                            path_disp = list(self.cfg.path)
+                            self.messages.append((
+                                ack_ts,
+                                self.cfg.callsign,
+                                src,
+                                ack_payload,
+                                path_disp,
+                                True,
+                            ))
+                            self._log_message(
+                                ack_ts, self.cfg.callsign, src, ack_payload, path_disp
+                            )
+                            self.sent_ack_times[ack_key] = ack_ts
+                        except (TypeError, ValueError):
+                            self.last_delivery_status = 'ACK ERROR'
 
             # Attempt to decode Mic‑E packets.  This is done after
             # acknowledgement handling so that Mic‑E position reports are
@@ -1180,16 +1378,88 @@ class APRSTUI:
             except Exception:
                 decoded = None
             if decoded is not None:
-                # encode back to bytes using ASCII (fallback latin1) so that
-                # downstream code continues to work with bytes
-                try:
-                    info = decoded.encode('ascii', 'replace')
-                except Exception:
-                    info = decoded.encode('latin1', 'replace')
+                # Keep the downstream representation as bytes without losing
+                # UTF-8 characters from the Mic-E status/comment field.
+                info = decoded.encode('utf-8')
 
             # Save message; display the path exactly as provided by the TNC
             self.messages.append((ts, src, dest, info, path, False))
             self._log_message(ts, src, dest, info, path)
+
+    def _pop_pending_from(
+        self, msg_id: str, source: str
+    ) -> Optional[PendingMessage]:
+        """Remove a pending message only when the ACK came from its addressee."""
+        pending = self.pending_messages.get(msg_id)
+        if pending is None:
+            return None
+        if pending.destination.upper() != source.upper():
+            return None
+        return self.pending_messages.pop(msg_id)
+
+    def _track_pending_message(
+        self,
+        destination: str,
+        text: str,
+        msg_id: Optional[str],
+        payload: bytes,
+        sent_at: float,
+    ) -> None:
+        if msg_id is None:
+            self.last_delivery_status = 'ONE-SHOT'
+            return
+        self.pending_messages[msg_id] = PendingMessage(
+            destination=destination,
+            text=text,
+            msg_id=msg_id,
+            payload=payload,
+            last_sent=sent_at,
+        )
+        self.last_delivery_status = f'WAIT {msg_id}'
+
+    def _retry_pending_messages(self) -> None:
+        """Perform one conservative retry for an ACK-requesting message."""
+        if not self.ack_enabled:
+            return
+        now = time.time()
+        for msg_id, pending in list(self.pending_messages.items()):
+            if now - pending.last_sent < MESSAGE_RETRY_INTERVAL:
+                continue
+            if pending.attempts >= MAX_MESSAGE_ATTEMPTS:
+                del self.pending_messages[msg_id]
+                self.last_delivery_status = f'NO ACK {msg_id}'
+                continue
+            try:
+                ax25 = encode_ax25_frame(
+                    self.cfg.tocall,
+                    self.cfg.callsign,
+                    self.cfg.path,
+                    pending.payload,
+                )
+            except (TypeError, ValueError):
+                del self.pending_messages[msg_id]
+                self.last_delivery_status = f'ERROR {msg_id}'
+                continue
+            self.tnc.send_frame(ax25)
+            pending.attempts += 1
+            pending.last_sent = now
+            path_disp = list(self.cfg.path)
+            self.messages.append((
+                now,
+                self.cfg.callsign,
+                pending.destination,
+                pending.payload,
+                path_disp,
+                True,
+            ))
+            self._log_message(
+                now,
+                self.cfg.callsign,
+                pending.destination,
+                pending.payload,
+                path_disp,
+            )
+            self.last_delivery_status = f'RETRY {msg_id}'
 
     # Prompt user for a string input
     def _prompt(self, prompt: str, default: str = '') -> Optional[str]:
@@ -1274,28 +1544,30 @@ class APRSTUI:
             _redraw_prompt()
             while True:
                 try:
-                    ch = self.stdscr.getch()
+                    ch = self.stdscr.get_wch()
                 except Exception:
                     continue
-                if ch == curses.KEY_RESIZE:
+                if isinstance(ch, int) and ch == curses.KEY_RESIZE:
                     _redraw_prompt()
                     continue
                 # Enter key (carriage return or newline) finalises input
-                if ch in (10, 13):
+                if ch in ('\n', '\r', 10, 13):
                     break
                 # Escape key cancels input
-                if ch == 27:  # ESC
+                if ch in ('\x1b', 27):
                     return None
                 # Backspace handling (support DEL and Backspace)
-                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if ch in ('\x7f', '\b', curses.KEY_BACKSPACE, 127, 8):
                     if buffer:
                         buffer.pop()
                         _redraw_prompt()
                     continue
-                # Ignore control characters and curses special-key values
-                if ch < 32 or ch > 255:
+                # Ignore control characters and curses special-key values.
+                if isinstance(ch, int):
                     continue
-                buffer.append(chr(ch))
+                if ord(ch) < 32 or ord(ch) == 127:
+                    continue
+                buffer.append(ch)
                 _redraw_prompt()
         finally:
             curses.noecho()
@@ -1327,18 +1599,20 @@ class APRSTUI:
             text = self._prompt_cancelable("Message: ")
             if text is None:
                 return
-            # Determine whether to include an acknowledgement ID.  When
-            # acknowledgements are disabled (for example, during satellite
-            # operations), omit the message ID entirely by passing None to
-            # build_aprs_message().  Otherwise obtain the next sequential ID.
+            # Determine whether to include an acknowledgement ID.  One-shot
+            # mode omits the ID; confirmed mode uses a limited retry policy.
             if self.ack_enabled:
-                msg_id = self.cfg.next_msg_id()
+                msg_id = _format_message_id(self.cfg.next_msg_id())
             else:
                 msg_id = None
-            payload = build_aprs_message(dest, text, msg_id=msg_id)
-            ax25 = encode_ax25_frame(
-                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
-            )
+            try:
+                payload = build_aprs_message(dest, text, msg_id=msg_id)
+                ax25 = encode_ax25_frame(
+                    self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+                )
+            except (TypeError, ValueError):
+                self.last_delivery_status = 'INVALID MSG'
+                return
             self.tnc.send_frame(ax25)
             # Log our own outgoing message to the UI
             ts = time.time()
@@ -1350,6 +1624,7 @@ class APRSTUI:
             # Store last message for possible retransmission.  msg_id may be None
             # when acknowledgements are disabled.
             self.last_message = (dest, text, msg_id)
+            self._track_pending_message(dest, text, msg_id, payload, ts)
         finally:
             # Restore non‑blocking mode
             self.stdscr.nodelay(True)
@@ -1359,16 +1634,21 @@ class APRSTUI:
     def _send_position(self) -> None:
         # Use the stored position comment directly; do not prompt each time.
         comment = self.cfg.pos_comment
-        payload = build_aprs_position(
-            self.cfg.latitude,
-            self.cfg.longitude,
-            self.cfg.symbol_table,
-            self.cfg.symbol_code,
-            comment,
-        )
-        ax25 = encode_ax25_frame(
-            self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
-        )
+        try:
+            payload = build_aprs_position(
+                self.cfg.latitude,
+                self.cfg.longitude,
+                self.cfg.symbol_table,
+                self.cfg.symbol_code,
+                comment,
+                messaging_capable=True,
+            )
+            ax25 = encode_ax25_frame(
+                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+            )
+        except (TypeError, ValueError):
+            self.last_delivery_status = 'INVALID POS'
+            return
         self.tnc.send_frame(ax25)
         ts = time.time()
         # Mark path for display
@@ -1392,9 +1672,9 @@ class APRSTUI:
             )
             if new_call is None:
                 return
-            # TOCALL
+            # AX.25 destination / APRS software identifier
             new_tocall = self._prompt_cancelable(
-                f"Tocall (software id) (current {self.cfg.tocall}): ", self.cfg.tocall
+                f"TOCALL (current {self.cfg.tocall}): ", self.cfg.tocall
             )
             if new_tocall is None:
                 return
@@ -1463,57 +1743,57 @@ class APRSTUI:
             )
             if new_port_str is None:
                 return
-            # All prompts succeeded: update configuration
-            # Callsign
-            if new_call:
-                self.cfg.callsign = new_call.strip().upper()
-            # TOCALL (limit to 6 chars and uppercase)
-            if new_tocall:
-                self.cfg.tocall = new_tocall.strip().upper()[:6]
-            # Path: split by comma or whitespace but keep hyphens within SSID
-            if path_str is not None:
-                self.cfg.path = [
+            # Validate all values before changing the active configuration.
+            try:
+                valid_call = normalize_ax25_address(new_call, 'Callsign')
+                valid_tocall = normalize_ax25_address(new_tocall, 'TOCALL')
+                valid_path = normalize_path([
                     p.strip().upper()
                     for p in path_str.replace(',', ' ').split()
                     if p.strip()
-                ]
-            # Latitude
-            try:
-                lat_val = float(lat_val_str)
-            except Exception:
-                lat_val = abs(self.cfg.latitude)
-            lat_dir = (lat_dir or ('N' if self.cfg.latitude >= 0 else 'S')).upper()
-            if lat_dir not in ['N', 'S']:
-                lat_dir = 'N'
-            self.cfg.latitude = lat_val if lat_dir == 'N' else -lat_val
-            # Longitude
-            try:
-                lon_val = float(lon_val_str)
-            except Exception:
-                lon_val = abs(self.cfg.longitude)
-            lon_dir = (lon_dir or ('E' if self.cfg.longitude >= 0 else 'W')).upper()
-            if lon_dir not in ['E', 'W']:
-                lon_dir = 'E'
-            self.cfg.longitude = lon_val if lon_dir == 'E' else -lon_val
-            # Symbol table
-            if sym_table in ['/', '\\']:
-                self.cfg.symbol_table = sym_table
-            # Symbol code
-            if sym_code:
-                self.cfg.symbol_code = sym_code[0]
-            # Default comment
-            if pos_comm is not None:
-                self.cfg.pos_comment = pos_comm
-            # KISS host
-            if new_host:
-                self.cfg.host = new_host.strip()
-            # KISS port
-            if new_port_str:
-                try:
-                    self.cfg.port = int(new_port_str)
-                except Exception:
-                    # Leave existing port unchanged if conversion fails
-                    pass
+                ])
+                lat_mag = abs(float(lat_val_str))
+                lon_mag = abs(float(lon_val_str))
+                lat_dir_value = lat_dir.strip().upper()
+                lon_dir_value = lon_dir.strip().upper()
+                if lat_dir_value not in ('N', 'S'):
+                    raise ValueError('Latitude direction must be N or S')
+                if lon_dir_value not in ('E', 'W'):
+                    raise ValueError('Longitude direction must be E or W')
+                valid_lat = lat_mag if lat_dir_value == 'N' else -lat_mag
+                valid_lon = lon_mag if lon_dir_value == 'E' else -lon_mag
+                valid_symbol_table = sym_table.strip().upper()
+                valid_symbol_code = sym_code[0] if sym_code else ''
+                valid_comment = pos_comm[:MAX_POSITION_COMMENT_CHARS]
+                valid_host = new_host.strip()
+                valid_port = int(new_port_str)
+                if not valid_host:
+                    raise ValueError('KISS host cannot be empty')
+                if not 1 <= valid_port <= 65535:
+                    raise ValueError('KISS port must be between 1 and 65535')
+                # Reuse the packet builder as the canonical coordinate/symbol
+                # validation path.
+                build_aprs_position(
+                    valid_lat,
+                    valid_lon,
+                    valid_symbol_table,
+                    valid_symbol_code,
+                    valid_comment,
+                )
+            except (TypeError, ValueError):
+                self.last_delivery_status = 'INVALID CFG'
+                return
+
+            self.cfg.callsign = valid_call
+            self.cfg.tocall = valid_tocall
+            self.cfg.path = valid_path
+            self.cfg.latitude = valid_lat
+            self.cfg.longitude = valid_lon
+            self.cfg.symbol_table = valid_symbol_table
+            self.cfg.symbol_code = valid_symbol_code
+            self.cfg.pos_comment = valid_comment
+            self.cfg.host = valid_host
+            self.cfg.port = valid_port
         finally:
             # Restore non‑blocking mode
             self.stdscr.nodelay(True)
@@ -1536,38 +1816,16 @@ class APRSTUI:
         new packets arrive."""
         self.heard.clear()
 
-    def _mark_path_repeated(self, path: List[str]) -> List[str]:
-        """Return a copy of the path list with the last element marked as repeated.
-
-        In APRS notation a digipeater that has already repeated a packet is
-        indicated by a trailing asterisk (`*`) appended to its callsign.  Since
-        the low‑level AX.25 decoder used here does not expose the H‑bit, this
-        function appends a '*' to the last digipeater in the list as a simple
-        approximation.  If the path is empty, an empty list is returned.
-
-        :param path: Sequence of digipeaters extracted from the AX.25 header.
-        :return: A new list where the last element, if any, is suffixed with '*'.
-        """
-        if not path:
-            return []
-        marked = path.copy()
-        marked[-1] = f"{marked[-1]}*"
-        return marked
-
     def toggle_ack(self) -> None:
-        """Toggle the inclusion of message acknowledgements on outgoing messages.
-
-        When acknowledgements are enabled, outgoing APRS messages include a
-        sequential message ID with a leading '{', allowing the recipient to
-        acknowledge receipt.  Disabling acknowledgements omits this ID,
-        which can be desirable for satellite communications where ACKs
-        are unsupported.  This method flips the state between ON and OFF.
-        """
+        """Toggle one-shot versus end-to-end acknowledged messages."""
         # Flip the acknowledgement flag and propagate the change back to the
         # configuration so that it can be persisted when saving.  Without
         # updating cfg.ack_enabled, the toggled state would be lost on the
         # next run.
         self.ack_enabled = not self.ack_enabled
+        if not self.ack_enabled:
+            self.pending_messages.clear()
+            self.last_delivery_status = 'ONE-SHOT'
         if hasattr(self.cfg, 'ack_enabled'):
             self.cfg.ack_enabled = self.ack_enabled
 
@@ -1587,10 +1845,14 @@ class APRSTUI:
         # Build payload based on the current acknowledgement setting.  If
         # acknowledgements are disabled, omit the message ID by passing None.
         use_id = msg_id if self.ack_enabled else None
-        payload = build_aprs_message(dest, text, msg_id=use_id)
-        ax25 = encode_ax25_frame(
-            self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
-        )
+        try:
+            payload = build_aprs_message(dest, text, msg_id=use_id)
+            ax25 = encode_ax25_frame(
+                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+            )
+        except (TypeError, ValueError):
+            self.last_delivery_status = 'INVALID MSG'
+            return
         self.tnc.send_frame(ax25)
         ts = time.time()
         # Log retransmitted message in the UI
@@ -1598,6 +1860,7 @@ class APRSTUI:
         path_disp = list(self.cfg.path)
         self.messages.append((ts, self.cfg.callsign, dest, payload, path_disp, True))
         self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
+        self._track_pending_message(dest, text, use_id, payload, ts)
 
     def compose_raw_data(self) -> None:
         """Prompt the user to enter a raw APRS payload and transmit it.
@@ -1616,16 +1879,17 @@ class APRSTUI:
             # Cancelled or empty: return without sending
             if text is None or text == '':
                 return
-            # Encode the raw text as Latin‑1 to preserve bytes; APRS payloads
-            # are typically ASCII but this allows extended characters.  Do not
-            # append any message ID.
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+                self.last_delivery_status = 'INVALID RAW'
+                return
+            payload = text.encode('utf-8')
             try:
-                payload = text.encode('latin1')
-            except Exception:
-                payload = text.encode('ascii', errors='replace')
-            ax25 = encode_ax25_frame(
-                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
-            )
+                ax25 = encode_ax25_frame(
+                    self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+                )
+            except (TypeError, ValueError):
+                self.last_delivery_status = 'INVALID RAW'
+                return
             self.tnc.send_frame(ax25)
             ts = time.time()
             # Log the transmission and display the TOCALL as the destination.  Even
@@ -1653,13 +1917,14 @@ class APRSTUI:
         if not self.last_raw:
             return
         text = self.last_raw
+        payload = text.encode('utf-8')
         try:
-            payload = text.encode('latin1')
-        except Exception:
-            payload = text.encode('ascii', errors='replace')
-        ax25 = encode_ax25_frame(
-            self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
-        )
+            ax25 = encode_ax25_frame(
+                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+            )
+        except (TypeError, ValueError):
+            self.last_delivery_status = 'INVALID RAW'
+            return
         self.tnc.send_frame(ax25)
         ts = time.time()
         # Display the TOCALL as the destination in the UI for raw repeats
@@ -1694,11 +1959,18 @@ class APRSTUI:
                     return
                 dest = dest.strip().upper()
             # Determine message ID if acknowledgements are enabled
-            msg_id = self.cfg.next_msg_id() if self.ack_enabled else None
-            payload = build_aprs_message(dest, quick_text, msg_id=msg_id)
-            ax25 = encode_ax25_frame(
-                self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+            msg_id = (
+                _format_message_id(self.cfg.next_msg_id())
+                if self.ack_enabled else None
             )
+            try:
+                payload = build_aprs_message(dest, quick_text, msg_id=msg_id)
+                ax25 = encode_ax25_frame(
+                    self.cfg.tocall, self.cfg.callsign, self.cfg.path, payload
+                )
+            except (TypeError, ValueError):
+                self.last_delivery_status = 'INVALID MSG'
+                return
             self.tnc.send_frame(ax25)
             ts = time.time()
             path_disp = list(self.cfg.path)
@@ -1706,6 +1978,7 @@ class APRSTUI:
             self._log_message(ts, self.cfg.callsign, dest, payload, path_disp)
             # Update last_message record for potential repeat
             self.last_message = (dest, quick_text, msg_id)
+            self._track_pending_message(dest, quick_text, msg_id, payload, ts)
         finally:
             self.stdscr.nodelay(True)
             self.stdscr.timeout(100)
@@ -1716,9 +1989,11 @@ def main(stdscr: curses.window) -> None:
     saved = load_saved_config()
     if saved:
         # Populate StationConfig from saved data
-        raw_path = saved.get('path', [])
+        raw_path = saved.get('path', DEFAULT_PATH)
         if isinstance(raw_path, str):
             raw_path = [raw_path]
+        elif not isinstance(raw_path, list):
+            raw_path = []
         normalized_path = [
             p.strip().upper()
             for item in raw_path
@@ -1727,7 +2002,7 @@ def main(stdscr: curses.window) -> None:
         ]
         cfg = StationConfig(
             callsign=saved.get('callsign', ''),
-            tocall=saved.get('tocall', 'APZ001'),
+            tocall=saved.get('tocall', APP_TOCALL),
             path=normalized_path,
             latitude=saved.get('latitude', 0.0),
             longitude=saved.get('longitude', 0.0),
@@ -1739,14 +2014,14 @@ def main(stdscr: curses.window) -> None:
             quick_msg1=saved.get('quick_msg1', 'QSL? 73'),
             quick_msg2=saved.get('quick_msg2', 'QSL! 73'),
             log_file=saved.get('log_file', 'aprs_tui.log'),
-            ack_enabled=saved.get('ack_enabled', True),
+            ack_enabled=saved.get('ack_enabled', False),
         )
     else:
         # Interactive setup if no saved configuration
         cfg = StationConfig(
             callsign='',
-            tocall='APZ001',
-            path=[],
+            tocall=APP_TOCALL,
+            path=list(DEFAULT_PATH),
             latitude=0.0,
             longitude=0.0,
             symbol_table='/',
@@ -1761,20 +2036,20 @@ def main(stdscr: curses.window) -> None:
         callsign = stdscr.getstr().decode('utf-8').strip()
         cfg.callsign = callsign.upper()
         curses.noecho()
-        # Optionally ask tocall
+        # Ask for the AX.25 destination / APRS TOCALL
         curses.echo()
-        stdscr.addstr(1, 0, "Software id (tocall, default APZ001): ")
+        stdscr.addstr(1, 0, f"TOCALL (default {APP_TOCALL}): ")
         stdscr.refresh()
-        tcall_input = stdscr.getstr().decode('utf-8').strip().upper()
-        if tcall_input:
-            cfg.tocall = tcall_input[:6]
+        tocall_input = stdscr.getstr().decode('utf-8').strip()
+        if tocall_input:
+            cfg.tocall = tocall_input.upper()
         curses.noecho()
         # Ask digipeater path
         curses.echo()
         stdscr.addstr(
             2,
             0,
-            "Digipeater path (comma or dash separated, leave blank for none): ",
+            "Digipeater path (comma/space separated; blank for none): ",
         )
         stdscr.refresh()
         path_input = stdscr.getstr().decode('utf-8').strip()
@@ -1807,7 +2082,8 @@ def main(stdscr: curses.window) -> None:
         curses.noecho()
         if lat_dir not in ['N', 'S']:
             lat_dir = 'N'
-        cfg.latitude = lat_val if lat_dir == 'N' else -lat_val
+        lat_mag = abs(lat_val)
+        cfg.latitude = lat_mag if lat_dir == 'N' else -lat_mag
         # Ask longitude (magnitude) and direction
         curses.echo()
         row += 1
@@ -1829,7 +2105,8 @@ def main(stdscr: curses.window) -> None:
         curses.noecho()
         if lon_dir not in ['E', 'W']:
             lon_dir = 'E'
-        cfg.longitude = lon_val if lon_dir == 'E' else -lon_val
+        lon_mag = abs(lon_val)
+        cfg.longitude = lon_mag if lon_dir == 'E' else -lon_mag
         # Ask symbol table and code for initial position symbol
         curses.echo()
         row += 1
@@ -1889,6 +2166,35 @@ def main(stdscr: curses.window) -> None:
             except Exception:
                 # Ignore invalid port numbers and keep the default
                 pass
+    # Validate saved or interactively entered settings before opening the TNC.
+    try:
+        cfg.callsign = normalize_ax25_address(cfg.callsign, 'Callsign')
+        cfg.tocall = normalize_ax25_address(cfg.tocall, 'TOCALL')
+        cfg.path = normalize_path(cfg.path)
+        cfg.latitude = float(cfg.latitude)
+        cfg.longitude = float(cfg.longitude)
+        cfg.port = int(cfg.port)
+        if not 1 <= cfg.port <= 65535:
+            raise ValueError('KISS port outside valid range')
+        cfg.pos_comment = str(cfg.pos_comment)[:MAX_POSITION_COMMENT_CHARS]
+        build_aprs_position(
+            cfg.latitude,
+            cfg.longitude,
+            cfg.symbol_table,
+            cfg.symbol_code,
+            cfg.pos_comment,
+        )
+    except (TypeError, ValueError):
+        stdscr.erase()
+        stdscr.addstr(
+            0,
+            0,
+            'Invalid station configuration; check callsign, TOCALL, path and position.',
+        )
+        stdscr.refresh()
+        time.sleep(3)
+        return
+
     # Clear screen before starting UI
     stdscr.erase()
     stdscr.refresh()

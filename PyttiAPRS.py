@@ -20,10 +20,9 @@ import re
 import math
 
 
-# Default APRS application identity.  APZ identifiers are reserved for
-# development.  Operators may change the TOCALL in the configuration, for
-# example when testing an allocated identifier or a compatible destination.
-APP_TOCALL = 'APZ001'
+# Default registered APRS application identity. Operators may change the
+# TOCALL in the configuration when needed.
+APP_TOCALL = 'APPYTT'
 
 # Protocol defaults and limits.  No digipeater path is assumed: satellite
 # aliases and terrestrial WIDEn-N paths evolve and remain user-configurable.

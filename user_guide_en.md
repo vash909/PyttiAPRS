@@ -31,7 +31,7 @@ python3 PyttiAPRS.py
 On the first run, enter:
 
 - your callsign and optional SSID;
-- the TOCALL, with `APZ001` as the default;
+- the TOCALL, with `APPYTT` as the default;
 - the digipeater path, or leave it blank;
 - latitude and longitude;
 - the APRS symbol table and symbol code;
@@ -40,7 +40,7 @@ On the first run, enter:
 
 The path accepts comma- or space-separated AX.25 addresses. Each address is validated, including its optional SSID, and a maximum of eight digipeaters is allowed.
 
-The AX.25 destination TOCALL defaults to the experimental identifier `APZ001`. It can be changed during initial setup or later with `c`, is validated like any other AX.25 address, and is saved in the configuration. The operator is responsible for choosing an appropriate registered or experimental identifier.
+The AX.25 destination TOCALL defaults to the registered PyttiAPRS identifier `APPYTT`. It can be changed during initial setup or later with `c`, is validated like any other AX.25 address, and is saved in the configuration.
 
 ## Screen layout
 

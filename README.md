@@ -67,7 +67,7 @@ python3 PyttiAPRS.py
 
 3. On first run, you'll be prompted for:
    - **Callsign** (e.g. `IU1BOT-9`)
-   - **TOCALL** (default `APZ001`, editable)
+   - **TOCALL** (default `APPYTT`, editable)
    - **Digipeater path** (comma or space-separated, for example `RS0ISS`, `WIDE2-2`, `WIDE1-1 WIDE2-2`, or blank)
    - **Latitude/Longitude** and **N/S**, **E/W**
    - **Symbol table** (`/` or `\`) and **symbol code** (single char)
@@ -110,7 +110,7 @@ The default path is blank. PyttiAPRS does not rewrite aliases or choose a satell
 - Tested with software TNCs using the standard KISS TCP interface (e.g. Direwolf).
 - Only **unconnected UI** frames are decoded. Connected-mode frames are ignored.
 - The implemented APRS subset includes messages, acknowledgements, uncompressed positions and Mic-E display decoding; this is not a claim to implement every APRS 1.2 data type.
-- `APZ001` is the default development TOCALL, but it can be edited and is persisted. Operators should use an appropriate registered or experimental identifier for their transmission.
+- `APPYTT` is the registered default TOCALL for PyttiAPRS, but it can be edited and is persisted.
 
 ---
 
@@ -129,7 +129,7 @@ The default path is blank. PyttiAPRS does not rewrite aliases or choose a satell
 - Kept one multi-purpose TUI and made the path fully operator-configurable: blank by default, with no hard-coded `ARISS` or satellite-only profile. Current satellite aliases such as `RS0ISS` and terrestrial paths such as `WIDE2-2` pass through the same AX.25 encoder.
 - Corrected AX.25 address validation and bits, KISS TCP fragmentation/escaping and multi-port data handling, UTF-8 limits, position rounding/DTI, Mic-E longitude and ambiguity decoding, and APRS message ID/ACK/reply-ack handling.
 - Added automatic ACK transmission, ACK/rejection correlation, a conservative single retry, and 24 protocol regression tests.
-- Restored an editable, persisted TOCALL while retaining `APZ001` as the default.
+- Restored an editable, persisted TOCALL.
 
 **2026-07-03**
 - Fixed a bug where a multi-hop digipeater path (e.g. `WIDE2-1,WIDE1-1`) could silently collapse to a single, SSID-less hop (e.g. `WIDE2`) when transmitted. The status bar and the "Edit configuration" screen were joining the path with `-` instead of `,` when displaying/re-reading its current value; accepting that value unchanged fed a malformed token back into the path parser. Both display points now use `,`, and loading a saved config re-normalizes the `path` field defensively so previously corrupted config files are repaired on load.

@@ -2223,7 +2223,13 @@ if __name__ == '__main__':
     # back to the "C" locale, which cannot render multi-byte UTF-8
     # characters (e.g. circled letters such as "ⓒⓠ" seen in
     # some APRS comments) and instead shows them mangled or as '?'.
-    locale.setlocale(locale.LC_ALL, '')
+    # If the environment's locale isn't installed on this system (e.g.
+    # a minimal Raspberry Pi image), fall back silently rather than
+    # preventing the program from starting at all.
+    try:
+        locale.setlocale(locale.LC_ALL, '')
+    except locale.Error:
+        pass
     # Initialise curses wrapper
     try:
         curses.wrapper(main)

@@ -8,6 +8,7 @@
 #      /____/  
                                                                                                                                                                                                            
 import curses
+import locale
 import os
 import socket
 import threading
@@ -2217,6 +2218,12 @@ def main(stdscr: curses.window) -> None:
 
 
 if __name__ == '__main__':
+    # Set the locale from the environment (e.g. en_US.UTF-8) before
+    # initialising curses.  Without this, Python's curses module falls
+    # back to the "C" locale, which cannot render multi-byte UTF-8
+    # characters (e.g. circled letters such as "ⓒⓠ" seen in
+    # some APRS comments) and instead shows them mangled or as '?'.
+    locale.setlocale(locale.LC_ALL, '')
     # Initialise curses wrapper
     try:
         curses.wrapper(main)
